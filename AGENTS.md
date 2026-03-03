@@ -1,6 +1,10 @@
 # AGENTS.md
 # Working agreements for Codex (and humans) — Prototype I-2..I-7
 
+## Language
+- Always respond in Simplified Chinese unless the user explicitly requests English.
+- Keep commands, file paths, and code keywords unchanged (do not translate).
+
 ## 0) Mission
 Build a minimal, runnable prototype for:
 - I-2..I-6 implementation
