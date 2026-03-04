@@ -440,3 +440,7 @@
 #### 已知限制 & 下一步建议
 - 目前 EWC 配置仍由测试/demo 手动注入，尚未接入 Gateway（Issue 4+）。
 - 尚未引入伪解密与 decode fail 路径（后续在 Decode 阶段插入）。
+
+#### 推送状态更新
+**状态：** 已推送  
+**远端：** origin/issue-3-ewc-fetch-gate
