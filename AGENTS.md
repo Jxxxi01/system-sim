@@ -5,7 +5,7 @@
 - Always respond in Simplified Chinese unless the user explicitly requests English.
 - Keep commands, file paths, and code keywords unchanged (do not translate).
 
-## 0) Mission
+## Mission
 Build a minimal, runnable prototype for:
 - I-2..I-6 implementation
 - I-7 demos: normal + cross-user
@@ -16,13 +16,13 @@ Authoritative docs:
 - `docs/system_design_v3.md` (full design reference)
 - `docs/progress_tracking_v3.md` (milestones / checklist)
 
-## 1) Safety / permissions (non-negotiable)
+## Safety / permissions (non-negotiable)
 - NEVER use `sudo`.
 - Do NOT install dependencies.
 - Any shell command (including build/test/git) must be PROPOSED first; user will approve before execution.
 - It is allowed to edit files in the working tree and run tests *after* command approval.
 
-## 2) Implementation constraints
+## Implementation constraints
 - Language: C++17 (stdlib only). Keep external deps = 0.
 - Keep code structured for extension, but implement only what the spec requires.
 - Highest priority feature: EWC mandatory gate in Fetch:
@@ -33,12 +33,12 @@ Authoritative docs:
   - Must be implemented as an opaque index to per-process security context.
   - Context switch must change which EWC windows are active.
 
-## 3) Required observability for every demo run
+## Required observability for every demo run
 - Print trap reason code (or `HALT` on success)
 - Print audit events stream (stdout; optional NDJSON file)
 - Print context_handle switch trace
 
-## 4) Build & test (must be green at all times)
+## Build & test (must be green at all times)
 Configure/build/test (preferred):
 - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
 - `cmake --build build`
@@ -48,7 +48,7 @@ Rules:
 - Always run `ctest` after code changes (once user approves the commands).
 - Do not merge incomplete work that breaks tests.
 
-## 5) Workflow: small issues only
+## Workflow: small issues only
 We work in small, reviewable issues. For each issue:
 1) Read `docs/spec_i2_i7.md` sections relevant to the issue.
 2) Propose a plan (files to edit, APIs, tests, demo changes).
@@ -56,7 +56,7 @@ We work in small, reviewable issues. For each issue:
 4) Propose commands to run (build/test/demo).
 5) After tests pass, prepare git branch + commit + push (user must approve commands).
 
-## 6) Git delivery requirement (every issue)
+## Git delivery requirement (every issue)
 After each issue is complete:
 - Create/switch to feature branch: `issue-<n>-<shortname>`
 - Commit message: `issue <n>: <summary>`
@@ -67,7 +67,7 @@ Restrictions:
 - NEVER run `git push` without user approval.
 - Before commit: show `git status` + summarize `git diff` (high level).
 
-## 7) What to do when unsure
+## What to do when unsure
 - If the spec is unclear: ask a targeted question and point to the exact section/file.
 - If design conflicts: `docs/spec_i2_i7.md` wins for this prototype.
 - If you want to add a feature not in scope: propose it explicitly as a follow-up issue (do not implement silently).

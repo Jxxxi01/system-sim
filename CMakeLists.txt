@@ -18,6 +18,7 @@ include(CTest)
 
 add_library(simulator_core STATIC
   src/core/scaffold.cpp
+  src/isa/assembler.cpp
   src/isa/scaffold.cpp
   src/security/scaffold.cpp
   src/kernel/scaffold.cpp
@@ -39,4 +40,15 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME sanity COMMAND test_sanity)
+
+  add_executable(test_isa_assembler
+    tests/test_isa_assembler.cpp
+  )
+
+  target_link_libraries(test_isa_assembler
+    PRIVATE
+      simulator_core
+  )
+
+  add_test(NAME isa_assembler COMMAND test_isa_assembler)
 endif()
