@@ -5,6 +5,126 @@
 - Always respond in Simplified Chinese unless the user explicitly requests English.
 - Keep commands, file paths, and code keywords unchanged (do not translate).
 
+## Project log (mandatory)
+
+### Location
+- The project log file is: `docs/project_log.md`
+- If it does not exist, create it.
+- Always APPEND new content; never rewrite or delete existing log history.
+
+### Language rule (strict)
+- All log text written into `docs/project_log.md` MUST be in **Simplified Chinese**, including headings/section titles.
+- Commands, file paths, identifiers, enum names, function names, and code snippets MUST remain exactly as-is in English (do not translate).
+
+### When to write (two phases per issue)
+For each Issue, you MUST write to the log in two phases:
+
+#### Phase A: Plan Frozen
+Trigger: when the user explicitly confirms the plan (e.g., “OK / confirmed / can start coding / start implementing”).
+Action:
+- Append a new section using the exact template below: “Issue <n>：<shortname>（方案确认）”.
+- The section MUST include:
+  - initial request summary (from user)
+  - additional requirements added later
+  - final plan before coding (files/modules, interfaces, invariants/semantics, test plan, acceptance commands)
+
+#### Phase B: Implementation Recap
+Trigger: after implementation is done AND tests are green (or user confirms it’s OK).
+Action:
+- Append “实现复盘” under the same Issue section using the exact template below.
+- Include:
+  - diff-style file change summary (if you cannot run git, list changed files + what changed)
+  - per-file recap (what/why)
+  - behavior changes and failure modes (trap, etc.)
+  - commands proposed/ran + tests passed
+  - known limitations + next steps
+
+### Hard constraints
+- Never run `git push` unless the user approves.
+- If an issue is cancelled/deferred (no coding), still write a log entry with Status: 取消/延期.
+
+### Status rules (push is NOT required to be "implemented")
+- "cancelled/deferred" is ONLY for issues that did NOT proceed to coding, or were abandoned mid-way.
+- If coding is done and tests are green but the user has NOT pushed yet:
+  - still write "实现复盘"
+  - set Status to: 已实现（未推送）
+  - set Remote to: 未推送
+- If the user later pushes the branch, append a short update under the same Issue section:
+  - **状态：** 已推送
+  - **远端：** origin/<branch>
+
+### Log entry template (MUST follow exactly; content in Chinese)
+Append the following template and fill it:
+
+## Issue <n>：<shortname>（方案确认）
+**日期：** <YYYY-MM-DD>  
+**分支：** <issue-<n>-<shortname>>  
+**状态：** 方案已确认
+
+### 初始需求（用户提出）
+- ...
+- ...
+
+### 额外补充/优化需求（对话新增）
+- ...（如无则写“无”）
+
+### Coding 前最终方案
+#### 文件与模块清单
+- 新增：
+  - ...
+- 修改：
+  - ...
+
+#### 关键接口/数据结构（签名级）
+- ...
+- ...
+
+#### 语义/不变量（必须测死，后续不得漂移）
+- ...
+- ...
+
+#### 测试计划（测试名 + 核心断言点）
+- <TestName>：...
+- ...
+
+#### 验收命令（仅列出，将由用户批准后执行）
+- cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+- cmake --build build
+- ctest --test-dir build
+- <demo run command>
+
+### 实现复盘
+**状态：** <已实现｜已实现（未推送）｜已推送｜取消｜延期>  
+**提交：** <commit hash｜TBD>  
+**远端：** <未推送｜origin/<branch>>
+
+Optional (when user pushes later, append this mini-update under the same Issue section):
+#### 推送状态更新
+**状态：** 已推送  
+**远端：** origin/<branch>
+
+#### 改动摘要（diff 风格）
+- <类似 git diff --stat 的摘要；若无法运行命令，列出文件清单 + 改动规模>
+
+#### 关键文件逐条复盘
+- <file>：改了什么 / 为什么
+- ...
+
+#### 行为变化总结
+- 新增能力：
+  - ...
+- 失败模式/Trap：
+  - ...
+
+#### 测试与运行
+- 建议/已执行命令：
+  - ...
+- 已通过测试：
+  - ...
+
+#### 已知限制 & 下一步建议
+- ...
+
 ## Mission
 Build a minimal, runnable prototype for:
 - I-2..I-6 implementation

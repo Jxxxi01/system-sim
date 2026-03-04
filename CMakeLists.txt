@@ -17,6 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 
 add_library(simulator_core STATIC
+  src/core/executor.cpp
   src/core/scaffold.cpp
   src/isa/assembler.cpp
   src/isa/scaffold.cpp
@@ -51,4 +52,24 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME isa_assembler COMMAND test_isa_assembler)
+
+  add_executable(test_executor
+    tests/test_executor.cpp
+  )
+
+  target_link_libraries(test_executor
+    PRIVATE
+      simulator_core
+  )
+
+  add_test(NAME executor COMMAND test_executor)
 endif()
+
+add_executable(demo_normal
+  demos/normal/demo_normal.cpp
+)
+
+target_link_libraries(demo_normal
+  PRIVATE
+    simulator_core
+)
