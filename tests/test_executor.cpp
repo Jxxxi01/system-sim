@@ -1,11 +1,13 @@
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
+#include "security/ewc.hpp"
 #include "test_harness.hpp"
 
 #include <cstdint>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -13,6 +15,19 @@ sim::core::ExecResult Run(const std::string& text, std::uint64_t base_va, std::s
                           std::size_t max_steps = 1000000) {
   const sim::isa::AsmProgram program = sim::isa::AssembleText(text, base_va);
   return sim::core::ExecuteProgram(program, base_va, mem_size, max_steps);
+}
+
+sim::core::ExecResult RunWithEwc(const std::string& text, std::uint64_t base_va,
+                                 const sim::security::EwcTable& ewc,
+                                 sim::security::ContextHandle context_handle, std::size_t mem_size = 64 * 1024,
+                                 std::size_t max_steps = 1000000) {
+  const sim::isa::AsmProgram program = sim::isa::AssembleText(text, base_va);
+  sim::core::ExecuteOptions options;
+  options.mem_size = mem_size;
+  options.max_steps = max_steps;
+  options.context_handle = context_handle;
+  options.ewc = &ewc;
+  return sim::core::ExecuteProgram(program, base_va, options);
 }
 
 bool Contains(const std::string& text, const std::string& needle) {
@@ -155,6 +170,103 @@ SIM_TEST(PrintRunSummary_UsesTrapPcAsFinalPc) {
   const std::string out = oss.str();
   SIM_EXPECT_TRUE(Contains(out, "FINAL_REASON=HALT"));
   SIM_EXPECT_TRUE(Contains(out, "FINAL_PC=32768"));
+}
+
+SIM_TEST(Execute_EwcAllows_ProgramRunsToHalt) {
+  const std::string src = R"(
+  NOP
+  HALT
+)";
+  sim::security::EwcTable ewc;
+  const std::uint64_t base = 0x9000;
+  sim::security::ExecWindow w;
+  w.window_id = 1;
+  w.start_va = base;
+  w.end_va = base + 8;
+  w.owner_user_id = 1;
+  w.key_id = 11;
+  w.type = sim::security::ExecWindowType::CODE;
+  w.code_policy_id = 1;
+  ewc.SetWindows(7, std::vector<sim::security::ExecWindow>{w});
+
+  const auto result = RunWithEwc(src, base, ewc, 7);
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
+  SIM_EXPECT_EQ(result.audit_log.size(), static_cast<std::size_t>(0));
+}
+
+SIM_TEST(Execute_EwcDenies_AtEntry_TrapsEwcIllegalPc) {
+  const std::string src = R"(
+  NOP
+  HALT
+)";
+  sim::security::EwcTable ewc;
+  const std::uint64_t base = 0xA000;
+  sim::security::ExecWindow w;
+  w.window_id = 2;
+  w.start_va = base + 4;
+  w.end_va = base + 8;
+  w.owner_user_id = 1;
+  w.key_id = 22;
+  w.type = sim::security::ExecWindowType::CODE;
+  w.code_policy_id = 1;
+  ewc.SetWindows(9, std::vector<sim::security::ExecWindow>{w});
+
+  const auto result = RunWithEwc(src, base, ewc, 9);
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::EWC_ILLEGAL_PC);
+  SIM_EXPECT_EQ(result.audit_log.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_TRUE(Contains(result.audit_log[0], "EWC_ILLEGAL_PC"));
+  SIM_EXPECT_TRUE(Contains(result.trap.msg, "pc="));
+  SIM_EXPECT_TRUE(Contains(result.trap.msg, "context_handle=9"));
+}
+
+SIM_TEST(Execute_EwcSubsetWindow_JumpOut_TrapsEwcIllegalPc) {
+  const std::string src = R"(
+  J 8
+  NOP
+  NOP
+  HALT
+)";
+  sim::security::EwcTable ewc;
+  const std::uint64_t base = 0xB000;
+  sim::security::ExecWindow w;
+  w.window_id = 3;
+  w.start_va = base;
+  w.end_va = base + 8;  // Allow first 2 instructions only.
+  w.owner_user_id = 2;
+  w.key_id = 33;
+  w.type = sim::security::ExecWindowType::CODE;
+  w.code_policy_id = 1;
+  ewc.SetWindows(10, std::vector<sim::security::ExecWindow>{w});
+
+  const auto result = RunWithEwc(src, base, ewc, 10);
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::EWC_ILLEGAL_PC);
+  SIM_EXPECT_EQ(result.trap.pc, base + 12);  // Jump target still inside AsmProgram range.
+  SIM_EXPECT_EQ(result.audit_log.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_TRUE(Contains(result.audit_log[0], "EWC_ILLEGAL_PC"));
+  SIM_EXPECT_TRUE(Contains(result.trap.msg, "context_handle=10"));
+}
+
+SIM_TEST(Ewc_SetWindows_OverlapRejected) {
+  sim::security::EwcTable ewc;
+  sim::security::ExecWindow a;
+  a.window_id = 1;
+  a.start_va = 0x1000;
+  a.end_va = 0x1010;
+  a.type = sim::security::ExecWindowType::CODE;
+  sim::security::ExecWindow b;
+  b.window_id = 2;
+  b.start_va = 0x1008;
+  b.end_va = 0x1020;
+  b.type = sim::security::ExecWindowType::CODE;
+
+  try {
+    ewc.SetWindows(1, std::vector<sim::security::ExecWindow>{a, b});
+    SIM_EXPECT_TRUE(false);
+  } catch (const std::runtime_error& ex) {
+    const std::string msg = ex.what();
+    SIM_EXPECT_TRUE(Contains(msg, "overlap"));
+    SIM_EXPECT_TRUE(Contains(msg, "context_handle=1"));
+  }
 }
 
 int main() {

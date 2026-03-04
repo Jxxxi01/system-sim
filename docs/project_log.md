@@ -328,3 +328,115 @@
 #### 推送状态更新
 **状态：** 已推送  
 **远端：** origin/issue-2-executor
+
+## Issue 3：ewc-fetch-gate（方案确认）
+**日期：** 2026-03-04  
+**分支：** issue-3-ewc-fetch-gate  
+**状态：** 方案已确认
+
+### 初始需求（用户提出）
+- 在 Fetch 阶段实现 EWC mandatory gate。
+- deny 时必须 trap `EWC_ILLEGAL_PC`，并写入 audit 事件 `EWC_ILLEGAL_PC`。
+- 保持执行器流水线结构 `Fetch -> Decode -> Execute -> Mem -> Commit`。
+- 本 Issue 不引入 Gateway/PVT/SPE，EWC 由测试/demo 手动注入。
+
+### 额外补充/优化需求（对话新增）
+- Fetch 顺序修订：先做结构性 PC 校验（underflow/misaligned/oob），再做 EWC query，避免误报。
+- 保留旧 `ExecuteProgram` 签名作为 wrapper，但 wrapper 内也必须走 EWC query（allow-all window）。
+- `EwcTable` 当前原型禁止重叠窗口；`SetWindows` 需排序并检测 overlap，错误信息包含 `context_handle/window_id/range`。
+- `misaligned` 判定按 `(pc - base_va) % sim::isa::kInstrBytes != 0`。
+- wrapper 的 allow-all end 计算固定为 `base_va + code_size * sim::isa::kInstrBytes`（end exclusive）。
+
+### Coding 前最终方案
+#### 文件与模块清单
+- 新增：
+  - `include/security/ewc.hpp`
+  - `src/security/ewc.cpp`
+- 修改：
+  - `include/core/executor.hpp`
+  - `src/core/executor.cpp`
+  - `tests/test_executor.cpp`
+  - `demos/normal/demo_normal.cpp`
+  - `CMakeLists.txt`
+
+#### 关键接口/数据结构（签名级）
+- `ExecWindow{window_id,start_va,end_va,owner_user_id,key_id,type,code_policy_id}`
+- `EwcQueryResult{allow,matched_window,key_id,window_id,owner_user_id,code_policy_id}`
+- `class EwcTable { SetWindows(...); Query(...); }`
+- `TrapReason` 新增 `EWC_ILLEGAL_PC`
+- `ExecuteOptions{mem_size,max_steps,context_handle,ewc}`
+- 新增 `ExecuteProgram(program, entry_pc, const ExecuteOptions&)`
+- 保留旧签名 `ExecuteProgram(program, entry_pc, mem_size, max_steps)` 作为 wrapper
+
+#### 语义/不变量（必须测死，后续不得漂移）
+- Fetch 顺序固定：结构性 PC 校验 -> EWC query -> 取指。
+- EWC deny：
+  - `trap.reason == EWC_ILLEGAL_PC`
+  - `audit_log` 写入 `EWC_ILLEGAL_PC ...`
+  - `trap.msg` 至少包含 `pc/context_handle/window_id`
+- wrapper 也必须触发 EWC query（通过 allow-all window）。
+- 同一 context 的 EWC windows 不允许重叠。
+
+#### 测试计划（测试名 + 核心断言点）
+- `Execute_EwcAllows_ProgramRunsToHalt`：allow 场景可到 HALT。
+- `Execute_EwcDenies_AtEntry_TrapsEwcIllegalPc`：entry 即 deny，断言 reason/audit/msg。
+- `Execute_EwcSubsetWindow_JumpOut_TrapsEwcIllegalPc`：跳出允许窗口后 deny，且 PC 仍在 image 内。
+- `Ewc_SetWindows_OverlapRejected`：重叠窗口配置失败并返回可诊断错误信息。
+- 兼容回归：现有执行器测试继续可过（通过旧接口 wrapper）。
+
+#### 验收命令（仅列出，将由用户批准后执行）
+- cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+- cmake --build build
+- ctest --test-dir build
+- ./build/demo_normal
+
+### 实现复盘
+**状态：** 已实现（未推送）  
+**提交：** TBD  
+**远端：** 未推送
+
+#### 改动摘要（diff 风格）
+- 新增 EWC 模块（`include/security/ewc.hpp`、`src/security/ewc.cpp`）。
+- 扩展执行器接口与实现以接入 EWC gate（`include/core/executor.hpp`、`src/core/executor.cpp`）。
+- 扩展执行器测试以覆盖 EWC allow/deny/jump-out/overlap（`tests/test_executor.cpp`）。
+- 更新 demo 展示 allow 与 deny 两种路径（`demos/normal/demo_normal.cpp`）。
+- 更新构建接入 EWC 源文件（`CMakeLists.txt`）。
+
+#### 关键文件逐条复盘
+- `include/security/ewc.hpp`：定义 `ExecWindow`、`EwcQueryResult`、`EwcTable` 接口，支持按 `context_handle` 管理窗口。
+- `src/security/ewc.cpp`：实现 `SetWindows/Query`，并在 `SetWindows` 中排序+重叠检测，拒绝 overlap 配置。
+- `include/core/executor.hpp`：新增 `TrapReason::EWC_ILLEGAL_PC`、`ExecuteOptions`、新 `ExecuteProgram` 签名；保留旧签名 wrapper。
+- `src/core/executor.cpp`：Fetch 阶段顺序固定为“结构性 PC 校验 -> EWC query -> 取指”；deny 路径写 trap + audit；旧签名 wrapper 内构造 allow-all window 并强制走 EWC。
+- `tests/test_executor.cpp`：新增 4 组 EWC 测试并保留既有执行器回归测试。
+- `demos/normal/demo_normal.cpp`：新增 `[CASE_A_ALLOW]` 与 `[CASE_B_DENY]` 演示，打印 summary 与 deny 审计。
+- `CMakeLists.txt`：将 `src/security/ewc.cpp` 纳入 `simulator_core`。
+
+#### 行为变化总结
+- 新增能力：
+  - EWC 成为 Fetch 必经 gate。
+  - 支持按 `context_handle` 的窗口查询与 deny 拦截。
+  - deny 时产生 `EWC_ILLEGAL_PC` trap，并写入 audit 事件。
+  - 旧执行器调用路径仍可运行（wrapper 注入 allow-all EWC）。
+- 失败模式/Trap：
+  - `EWC_ILLEGAL_PC`（EWC deny）
+  - `INVALID_PC`（underflow/misaligned/oob）
+  - 其余既有 trap 语义保持不变（如 `INVALID_MEMORY`、`STEP_LIMIT` 等）。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+  - cmake --build build
+  - ctest --test-dir build --output-on-failure
+  - ./build/demo_normal
+- 已通过测试：
+  - `sanity`
+  - `isa_assembler`
+  - `executor`（3/3 通过）
+- demo 输出（关键）：
+  - `[CASE_A_ALLOW] FINAL_REASON=HALT`
+  - `[CASE_B_DENY] FINAL_REASON=EWC_ILLEGAL_PC`
+  - 审计包含：`EWC_ILLEGAL_PC pc=... context_handle=... window_id=none`
+
+#### 已知限制 & 下一步建议
+- 目前 EWC 配置仍由测试/demo 手动注入，尚未接入 Gateway（Issue 4+）。
+- 尚未引入伪解密与 decode fail 路径（后续在 Decode 阶段插入）。

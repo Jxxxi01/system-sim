@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "isa/instr.hpp"
 #include "isa/opcode.hpp"
@@ -27,6 +28,32 @@ std::string MakeInvalidPcMsg(std::uint64_t pc, std::uint64_t base_va, std::strin
   std::ostringstream oss;
   oss << "invalid_pc reason=" << reason << " pc=" << pc << " base_va=" << base_va
       << " index=" << index << " code_size=" << code_size;
+  return oss.str();
+}
+
+std::string MakeEwcDenyMsg(std::uint64_t pc, sim::security::ContextHandle context_handle,
+                           const sim::security::EwcQueryResult& query_result) {
+  std::ostringstream oss;
+  oss << "ewc_illegal_pc"
+      << " pc=" << pc << " context_handle=" << context_handle << " window_id=";
+  if (query_result.matched_window) {
+    oss << query_result.window_id;
+  } else {
+    oss << "none";
+  }
+  return oss.str();
+}
+
+std::string MakeEwcDenyAudit(std::uint64_t pc, sim::security::ContextHandle context_handle,
+                             const sim::security::EwcQueryResult& query_result) {
+  std::ostringstream oss;
+  oss << "EWC_ILLEGAL_PC"
+      << " pc=" << pc << " context_handle=" << context_handle << " window_id=";
+  if (query_result.matched_window) {
+    oss << query_result.window_id;
+  } else {
+    oss << "none";
+  }
   return oss.str();
 }
 
@@ -79,7 +106,9 @@ bool AddPcRelative(std::uint64_t next_pc, std::int64_t imm, std::uint64_t* out_p
   return true;
 }
 
-bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc, FetchPacket* packet, Trap* trap) {
+bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc,
+                const sim::security::EwcTable& ewc, sim::security::ContextHandle context_handle,
+                FetchPacket* packet, Trap* trap, std::string* deny_audit) {
   const std::uint64_t base_va = program.base_va;
   const std::size_t code_size = program.code.size();
 
@@ -91,7 +120,7 @@ bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc, FetchPack
 
   const std::uint64_t delta = pc - base_va;
   const std::uint64_t index = delta / sim::isa::kInstrBytes;
-
+  // Alignment is defined relative to program image base, not absolute address.
   if ((delta % sim::isa::kInstrBytes) != 0) {
     *trap = Trap{TrapReason::INVALID_PC, pc,
                  MakeInvalidPcMsg(pc, base_va, std::to_string(index), code_size, "misaligned")};
@@ -104,17 +133,23 @@ bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc, FetchPack
     return false;
   }
 
+  const sim::security::EwcQueryResult query_result = ewc.Query(pc, context_handle);
+  if (!query_result.allow) {
+    *trap = Trap{TrapReason::EWC_ILLEGAL_PC, pc, MakeEwcDenyMsg(pc, context_handle, query_result)};
+    *deny_audit = MakeEwcDenyAudit(pc, context_handle, query_result);
+    return false;
+  }
+
   packet->pc = pc;
   packet->next_pc = pc + sim::isa::kInstrBytes;
   packet->index = static_cast<std::size_t>(index);
   packet->instr = program.code[packet->index];
 
-  // Issue 3 hook: EWC gate check belongs here (before decode/execute).
   return true;
 }
 
 sim::isa::Instr DecodeStage(const FetchPacket& packet) {
-  // Issue 3 hook: decrypt/decode failure path can be injected here.
+  // Issue 4 hook: decrypt/decode failure path can be injected here.
   return packet.instr;
 }
 
@@ -151,26 +186,39 @@ void Store64LE(std::vector<std::uint8_t>* mem, std::uint64_t addr, std::uint64_t
 
 }  // namespace
 
-ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc, std::size_t mem_size,
-                          std::size_t max_steps) {
+ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc,
+                          const ExecuteOptions& options) {
   ExecResult result;
   result.state.pc = entry_pc;
   result.state.regs.fill(0);
-  result.state.mem.assign(mem_size, 0);
+  result.state.mem.assign(options.mem_size, 0);
+
+  if (options.ewc == nullptr) {
+    std::ostringstream oss;
+    oss << "ewc_not_configured"
+        << " pc=" << entry_pc << " context_handle=" << options.context_handle;
+    result.trap = Trap{TrapReason::EWC_ILLEGAL_PC, entry_pc, oss.str()};
+    return result;
+  }
 
   std::size_t steps = 0;
   while (true) {
-    if (steps >= max_steps) {
+    if (steps >= options.max_steps) {
       std::ostringstream oss;
       oss << "step_limit_exceeded pc=" << result.state.pc << " steps=" << steps
-          << " max_steps=" << max_steps;
+          << " max_steps=" << options.max_steps;
       result.trap = Trap{TrapReason::STEP_LIMIT, result.state.pc, oss.str()};
       break;
     }
 
     FetchPacket fetched;
     Trap fetch_trap;
-    if (!FetchStage(program, result.state.pc, &fetched, &fetch_trap)) {
+    std::string deny_audit;
+    if (!FetchStage(program, result.state.pc, *options.ewc, options.context_handle, &fetched, &fetch_trap,
+                    &deny_audit)) {
+      if (!deny_audit.empty()) {
+        result.audit_log.push_back(std::move(deny_audit));
+      }
       result.trap = std::move(fetch_trap);
       break;
     }
@@ -195,7 +243,6 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
       }
       case sim::isa::Op::LI: {
         if (!require_reg(instr.rd, "rd")) break;
-        // Explicit cast preserves the two's-complement bit pattern for negative immediates.
         result.state.regs[static_cast<std::size_t>(instr.rd)] = static_cast<std::uint64_t>(instr.imm);
         break;
       }
@@ -298,7 +345,6 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
         break;
       }
       case sim::isa::Op::HALT: {
-        // Keep HALT stop point at the HALT instruction PC, not next_pc.
         result.state.regs[0] = 0;
         result.trap = Trap{TrapReason::HALT, fetched.pc, "halt"};
         return result;
@@ -324,12 +370,48 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
     }
 
     result.state.pc = committed_pc;
-    // x0 is hardwired to 0 and must be re-enforced every committed instruction.
     result.state.regs[0] = 0;
     ++steps;
   }
 
   return result;
+}
+
+ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc, std::size_t mem_size,
+                          std::size_t max_steps) {
+  sim::security::EwcTable temp_ewc;
+  if (!program.code.empty()) {
+    sim::security::ExecWindow allow_all;
+    allow_all.window_id = 1;
+    allow_all.start_va = program.base_va;
+    allow_all.owner_user_id = 0;
+    allow_all.key_id = 0;
+    allow_all.type = sim::security::ExecWindowType::CODE;
+    allow_all.code_policy_id = 0;
+
+    const unsigned __int128 span =
+        static_cast<unsigned __int128>(program.code.size()) * sim::isa::kInstrBytes;
+    const unsigned __int128 end128 = static_cast<unsigned __int128>(program.base_va) + span;
+    const unsigned __int128 max_u64 = static_cast<unsigned __int128>(std::numeric_limits<std::uint64_t>::max());
+    if (end128 > max_u64) {
+      ExecResult error;
+      error.state.pc = entry_pc;
+      error.state.regs.fill(0);
+      error.state.mem.assign(mem_size, 0);
+      error.trap = Trap{TrapReason::INVALID_PC, entry_pc, "invalid_pc reason=allow_all_window_overflow"};
+      return error;
+    }
+    // end_va is exclusive: [base_va, base_va + code_size * kInstrBytes)
+    allow_all.end_va = static_cast<std::uint64_t>(end128);
+    temp_ewc.SetWindows(0, std::vector<sim::security::ExecWindow>{allow_all});
+  }
+
+  ExecuteOptions options;
+  options.mem_size = mem_size;
+  options.max_steps = max_steps;
+  options.context_handle = 0;
+  options.ewc = &temp_ewc;
+  return ExecuteProgram(program, entry_pc, options);
 }
 
 const char* TrapReasonToString(TrapReason reason) {
@@ -346,13 +428,14 @@ const char* TrapReasonToString(TrapReason reason) {
       return "UNKNOWN_OPCODE";
     case TrapReason::STEP_LIMIT:
       return "STEP_LIMIT";
+    case TrapReason::EWC_ILLEGAL_PC:
+      return "EWC_ILLEGAL_PC";
   }
   return "UNKNOWN_OPCODE";
 }
 
 void PrintRunSummary(const ExecResult& result, std::ostream& os) {
   os << "FINAL_REASON=" << TrapReasonToString(result.trap.reason) << '\n';
-  // Always report stop-point PC (HALT instruction PC or trap PC).
   os << "FINAL_PC=" << result.trap.pc << '\n';
   os << "SYSCALL_COUNT=" << result.syscall_log.size() << '\n';
   os << "AUDIT_COUNT=" << result.audit_log.size() << '\n';
