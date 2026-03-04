@@ -324,3 +324,7 @@
 - 尚未接入 EWC gate（Issue 3 在 Fetch 插入）。
 - 尚未接入伪解密与 decode fail trap（Issue 4 在 Decode 插入）。
 - 建议下一步创建 `issue-2-executor` 分支并完成提交/推送，再继续 Issue 3。
+
+#### 推送状态更新
+**状态：** 已推送  
+**远端：** origin/issue-2-executor
