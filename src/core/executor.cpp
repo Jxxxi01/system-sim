@@ -12,6 +12,7 @@
 
 #include "isa/instr.hpp"
 #include "isa/opcode.hpp"
+#include "security/code_codec.hpp"
 
 namespace sim::core {
 namespace {
@@ -20,7 +21,10 @@ struct FetchPacket {
   std::uint64_t pc = 0;
   std::uint64_t next_pc = 0;
   std::size_t index = 0;
+  std::uint32_t key_id = 0;
+  bool has_cipher = false;
   sim::isa::Instr instr;
+  sim::security::CipherInstrUnit cipher;
 };
 
 std::string MakeInvalidPcMsg(std::uint64_t pc, std::uint64_t base_va, std::string_view index,
@@ -54,6 +58,24 @@ std::string MakeEwcDenyAudit(std::uint64_t pc, sim::security::ContextHandle cont
   } else {
     oss << "none";
   }
+  return oss.str();
+}
+
+std::string MakeDecryptFailMsg(std::uint64_t pc, sim::security::ContextHandle context_handle,
+                               std::uint32_t key_id, std::string_view detail) {
+  std::ostringstream oss;
+  oss << "decrypt_decode_fail"
+      << " pc=" << pc << " context_handle=" << context_handle << " key_id=" << key_id
+      << " detail=" << detail;
+  return oss.str();
+}
+
+std::string MakeDecryptFailAudit(std::uint64_t pc, sim::security::ContextHandle context_handle,
+                                 std::uint32_t key_id, std::string_view detail) {
+  std::ostringstream oss;
+  oss << "DECRYPT_DECODE_FAIL"
+      << " pc=" << pc << " context_handle=" << context_handle << " key_id=" << key_id
+      << " detail=" << detail;
   return oss.str();
 }
 
@@ -108,7 +130,8 @@ bool AddPcRelative(std::uint64_t next_pc, std::int64_t imm, std::uint64_t* out_p
 
 bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc,
                 const sim::security::EwcTable& ewc, sim::security::ContextHandle context_handle,
-                FetchPacket* packet, Trap* trap, std::string* deny_audit) {
+                const sim::security::CipherProgram* ciphertext, FetchPacket* packet, Trap* trap,
+                std::string* deny_audit) {
   const std::uint64_t base_va = program.base_va;
   const std::size_t code_size = program.code.size();
 
@@ -143,14 +166,36 @@ bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc,
   packet->pc = pc;
   packet->next_pc = pc + sim::isa::kInstrBytes;
   packet->index = static_cast<std::size_t>(index);
-  packet->instr = program.code[packet->index];
+  packet->key_id = query_result.key_id;
+  packet->has_cipher = (ciphertext != nullptr);
+  if (packet->has_cipher) {
+    packet->cipher = (*ciphertext)[packet->index];
+  } else {
+    packet->instr = program.code[packet->index];
+  }
 
   return true;
 }
 
-sim::isa::Instr DecodeStage(const FetchPacket& packet) {
-  // Issue 4 hook: decrypt/decode failure path can be injected here.
-  return packet.instr;
+bool DecodeStage(const FetchPacket& packet, sim::security::ContextHandle context_handle, sim::isa::Instr* instr,
+                 Trap* trap, std::string* decrypt_audit) {
+  if (!packet.has_cipher) {
+    *instr = packet.instr;
+    return true;
+  }
+
+  const sim::security::DecryptResult decrypt_result =
+      sim::security::DecryptInstr(packet.cipher, packet.key_id, packet.pc);
+  if (!decrypt_result.ok) {
+    *trap = Trap{TrapReason::DECRYPT_DECODE_FAIL, packet.pc,
+                 MakeDecryptFailMsg(packet.pc, context_handle, packet.key_id, decrypt_result.detail)};
+    *decrypt_audit =
+        MakeDecryptFailAudit(packet.pc, context_handle, packet.key_id, decrypt_result.detail);
+    return false;
+  }
+
+  *instr = decrypt_result.instr;
+  return true;
 }
 
 bool ResolveMemAddress(std::uint64_t base, std::int64_t imm, std::size_t mem_size,
@@ -188,10 +233,22 @@ void Store64LE(std::vector<std::uint8_t>* mem, std::uint64_t addr, std::uint64_t
 
 ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc,
                           const ExecuteOptions& options) {
+  if (options.ciphertext != nullptr && options.ciphertext->size() != program.code.size()) {
+    std::ostringstream oss;
+    oss << "ciphertext_size_mismatch code_size=" << program.code.size()
+        << " ciphertext_size=" << options.ciphertext->size();
+    throw std::runtime_error(oss.str());
+  }
+
   ExecResult result;
   result.state.pc = entry_pc;
   result.state.regs.fill(0);
   result.state.mem.assign(options.mem_size, 0);
+  {
+    std::ostringstream oss;
+    oss << "context_handle=" << options.context_handle;
+    result.context_trace.push_back(oss.str());
+  }
 
   if (options.ewc == nullptr) {
     std::ostringstream oss;
@@ -214,8 +271,8 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
     FetchPacket fetched;
     Trap fetch_trap;
     std::string deny_audit;
-    if (!FetchStage(program, result.state.pc, *options.ewc, options.context_handle, &fetched, &fetch_trap,
-                    &deny_audit)) {
+    if (!FetchStage(program, result.state.pc, *options.ewc, options.context_handle, options.ciphertext,
+                    &fetched, &fetch_trap, &deny_audit)) {
       if (!deny_audit.empty()) {
         result.audit_log.push_back(std::move(deny_audit));
       }
@@ -223,7 +280,16 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
       break;
     }
 
-    const sim::isa::Instr instr = DecodeStage(fetched);
+    sim::isa::Instr instr;
+    Trap decode_trap;
+    std::string decrypt_audit;
+    if (!DecodeStage(fetched, options.context_handle, &instr, &decode_trap, &decrypt_audit)) {
+      if (!decrypt_audit.empty()) {
+        result.audit_log.push_back(std::move(decrypt_audit));
+      }
+      result.trap = std::move(decode_trap);
+      break;
+    }
     std::uint64_t committed_pc = fetched.next_pc;
     Trap exec_trap;
     bool has_trap = false;
@@ -430,6 +496,8 @@ const char* TrapReasonToString(TrapReason reason) {
       return "STEP_LIMIT";
     case TrapReason::EWC_ILLEGAL_PC:
       return "EWC_ILLEGAL_PC";
+    case TrapReason::DECRYPT_DECODE_FAIL:
+      return "DECRYPT_DECODE_FAIL";
   }
   return "UNKNOWN_OPCODE";
 }

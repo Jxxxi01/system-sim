@@ -1,5 +1,6 @@
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
+#include "security/code_codec.hpp"
 #include "security/ewc.hpp"
 #include "test_harness.hpp"
 
@@ -19,14 +20,16 @@ sim::core::ExecResult Run(const std::string& text, std::uint64_t base_va, std::s
 
 sim::core::ExecResult RunWithEwc(const std::string& text, std::uint64_t base_va,
                                  const sim::security::EwcTable& ewc,
-                                 sim::security::ContextHandle context_handle, std::size_t mem_size = 64 * 1024,
-                                 std::size_t max_steps = 1000000) {
+                                 sim::security::ContextHandle context_handle,
+                                 const sim::security::CipherProgram* ciphertext = nullptr,
+                                 std::size_t mem_size = 64 * 1024, std::size_t max_steps = 1000000) {
   const sim::isa::AsmProgram program = sim::isa::AssembleText(text, base_va);
   sim::core::ExecuteOptions options;
   options.mem_size = mem_size;
   options.max_steps = max_steps;
   options.context_handle = context_handle;
   options.ewc = &ewc;
+  options.ciphertext = ciphertext;
   return sim::core::ExecuteProgram(program, base_va, options);
 }
 
@@ -244,6 +247,142 @@ SIM_TEST(Execute_EwcSubsetWindow_JumpOut_TrapsEwcIllegalPc) {
   SIM_EXPECT_EQ(result.audit_log.size(), static_cast<std::size_t>(1));
   SIM_EXPECT_TRUE(Contains(result.audit_log[0], "EWC_ILLEGAL_PC"));
   SIM_EXPECT_TRUE(Contains(result.trap.msg, "context_handle=10"));
+}
+
+SIM_TEST(Execute_PseudoDecrypt_CorrectKey_RunsToHalt) {
+  const std::string src = R"(
+  LI x1, 7
+  LI x2, 9
+  ADD x3, x1, x2
+  HALT
+)";
+  const std::uint64_t base = 0xC000;
+  const sim::isa::AsmProgram program = sim::isa::AssembleText(src, base);
+  const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 41);
+
+  sim::security::EwcTable ewc;
+  sim::security::ExecWindow w;
+  w.window_id = 4;
+  w.start_va = base;
+  w.end_va = base + program.code.size() * sim::isa::kInstrBytes;
+  w.owner_user_id = 3;
+  w.key_id = 41;
+  w.type = sim::security::ExecWindowType::CODE;
+  w.code_policy_id = 1;
+  ewc.SetWindows(11, std::vector<sim::security::ExecWindow>{w});
+
+  sim::core::ExecuteOptions options;
+  options.context_handle = 11;
+  options.ewc = &ewc;
+  options.ciphertext = &ciphertext;
+  const auto result = sim::core::ExecuteProgram(program, base, options);
+
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
+  SIM_EXPECT_EQ(result.state.regs[3], 16u);
+  SIM_EXPECT_EQ(result.audit_log.size(), static_cast<std::size_t>(0));
+}
+
+SIM_TEST(Execute_PseudoDecrypt_WrongKey_TrapsDecryptDecodeFail) {
+  const std::string src = R"(
+  LI x1, 123
+  HALT
+)";
+  const std::uint64_t base = 0xD000;
+  const sim::isa::AsmProgram program = sim::isa::AssembleText(src, base);
+  const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 55);
+
+  sim::security::EwcTable ewc;
+  sim::security::ExecWindow w;
+  w.window_id = 5;
+  w.start_va = base;
+  w.end_va = base + program.code.size() * sim::isa::kInstrBytes;
+  w.owner_user_id = 4;
+  w.key_id = 77;
+  w.type = sim::security::ExecWindowType::CODE;
+  w.code_policy_id = 1;
+  ewc.SetWindows(12, std::vector<sim::security::ExecWindow>{w});
+
+  sim::core::ExecuteOptions options;
+  options.context_handle = 12;
+  options.ewc = &ewc;
+  options.ciphertext = &ciphertext;
+  const auto result = sim::core::ExecuteProgram(program, base, options);
+
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
+  SIM_EXPECT_EQ(result.trap.pc, base);
+  SIM_EXPECT_EQ(result.audit_log.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_TRUE(Contains(result.audit_log[0], "DECRYPT_DECODE_FAIL"));
+  SIM_EXPECT_TRUE(Contains(result.audit_log[0], "context_handle=12"));
+  SIM_EXPECT_TRUE(Contains(result.audit_log[0], "key_id=77"));
+  SIM_EXPECT_TRUE(Contains(result.trap.msg, "detail=key_check_mismatch"));
+}
+
+SIM_TEST(Execute_PseudoDecrypt_TamperedCiphertext_TrapsDecryptDecodeFail) {
+  const std::string src = R"(
+  LI x1, 5
+  HALT
+)";
+  const std::uint64_t base = 0xE000;
+  const sim::isa::AsmProgram program = sim::isa::AssembleText(src, base);
+  sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 91);
+  ciphertext[0].payload[0] ^= 0x01u;
+
+  sim::security::EwcTable ewc;
+  sim::security::ExecWindow w;
+  w.window_id = 6;
+  w.start_va = base;
+  w.end_va = base + program.code.size() * sim::isa::kInstrBytes;
+  w.owner_user_id = 5;
+  w.key_id = 91;
+  w.type = sim::security::ExecWindowType::CODE;
+  w.code_policy_id = 1;
+  ewc.SetWindows(13, std::vector<sim::security::ExecWindow>{w});
+
+  sim::core::ExecuteOptions options;
+  options.context_handle = 13;
+  options.ewc = &ewc;
+  options.ciphertext = &ciphertext;
+  const auto result = sim::core::ExecuteProgram(program, base, options);
+
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
+  SIM_EXPECT_EQ(result.audit_log.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_TRUE(Contains(result.audit_log[0], "DECRYPT_DECODE_FAIL"));
+  SIM_EXPECT_TRUE(Contains(result.trap.msg, "detail=tag_mismatch"));
+}
+
+SIM_TEST(Execute_PseudoDecrypt_CiphertextSizeMismatch_Throws) {
+  const std::string src = R"(
+  LI x1, 1
+  LI x2, 2
+  HALT
+)";
+  const std::uint64_t base = 0xE100;
+  const sim::isa::AsmProgram program = sim::isa::AssembleText(src, base);
+  sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 101);
+  ciphertext.pop_back();
+
+  sim::security::EwcTable ewc;
+  sim::security::ExecWindow w;
+  w.window_id = 7;
+  w.start_va = base;
+  w.end_va = base + program.code.size() * sim::isa::kInstrBytes;
+  w.owner_user_id = 6;
+  w.key_id = 101;
+  w.type = sim::security::ExecWindowType::CODE;
+  w.code_policy_id = 1;
+  ewc.SetWindows(14, std::vector<sim::security::ExecWindow>{w});
+
+  sim::core::ExecuteOptions options;
+  options.context_handle = 14;
+  options.ewc = &ewc;
+  options.ciphertext = &ciphertext;
+
+  try {
+    static_cast<void>(sim::core::ExecuteProgram(program, base, options));
+    SIM_EXPECT_TRUE(false);
+  } catch (const std::runtime_error& ex) {
+    SIM_EXPECT_TRUE(Contains(ex.what(), "ciphertext_size_mismatch"));
+  }
 }
 
 SIM_TEST(Ewc_SetWindows_OverlapRejected) {

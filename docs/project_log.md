@@ -442,5 +442,150 @@
 - 尚未引入伪解密与 decode fail 路径（后续在 Decode 阶段插入）。
 
 #### 推送状态更新
-**状态：** 已推送  
+**状态：** 已推送
 **远端：** origin/issue-3-ewc-fetch-gate
+
+## Issue 4：pseudo-decrypt（方案确认）
+**日期：** 2026-03-08
+**分支：** issue-4-decrypt-before-decode
+**状态：** 方案已确认
+
+### 初始需求（用户提出）
+- 在 Fetch→Decode 之间插入伪解密阶段，作为 EWC 的子模块。
+- EWC Query 返回 `key_id` 后，用该 key 解密密文指令；校验失败触发 `DECRYPT_DECODE_FAIL` + 审计事件。
+- 代码在内存中始终是密文（密文模式开启时），每次 fetch 时解密。
+- 向后兼容：不提供密文时行为与 Issue 3 完全一致。
+
+### 额外补充/优化需求（对话新增）
+- 解密逻辑在架构上属于 EWC 的子功能（设计文档 §3.2：EWC = "代码身份验证 + 解密控制"），不是独立安全模块。以子模块形式实现，不集成到 `EwcTable` 中。
+- 加密函数（工具链侧）和解密函数（硬件侧）放在同一文件中，共享序列化格式。代码中注释标注各自归属（工具链侧 vs 硬件侧）。
+- 命名空间：`sim::security`（安全原语）。
+
+### Coding 前最终方案
+#### 文件与模块清单
+- 新增：
+  - `include/security/code_codec.hpp`（EWC 解密子模块接口 + 工具链侧加密函数）
+  - `src/security/code_codec.cpp`（实现）
+- 修改：
+  - `include/core/executor.hpp`（`TrapReason` 新增 `DECRYPT_DECODE_FAIL` + `ExecuteOptions` 扩展密文数据引用）
+  - `src/core/executor.cpp`（EWC allow 后插入解密+校验步骤）
+  - `tests/test_executor.cpp`（新增伪解密测试组）
+  - `demos/normal/demo_normal.cpp`（演示正确/错误 key 两条路径）
+  - `CMakeLists.txt`（纳入 `code_codec` 源文件）
+
+#### 语义接口（WHAT，签名由 Codex 决定）
+- **code_codec 解密（硬件侧）**：接收密文单元 + `key_id` + `pc`，解密并校验 tag/MAC。成功还原 `Instr`，失败报告校验不通过。模拟 EWC 在每次 Fetch 时的解密行为（设计文档 §9.3："合法 → 解密 → Decode"）。
+- **code_codec 加密（工具链侧）**：接收 `AsmProgram` + `key_id`，输出密文表示。模拟签名时的加密过程。
+- **TrapReason 扩展**：新增 `DECRYPT_DECODE_FAIL`，`TrapReasonToString` / `PrintRunSummary` 同步支持。
+- **ExecuteOptions 扩展**：新增密文数据的可选指针（默认 `nullptr`）。`nullptr` = 明文模式，非 `nullptr` = 密文模式。
+
+#### 语义/不变量（必须测死，后续不得漂移）
+- Pipeline 顺序固定：PC 校验 → EWC query(返回 `key_id`) → fetch 密文 → 解密(`key_id`, `pc`) → 校验 tag → `Instr` → Execute。
+- `DECRYPT_DECODE_FAIL` 优先级：仅在 PC 合法且 EWC allow 之后触发。
+- 确定性：相同 `(key_id, pc, ciphertext)` 必须产生相同结果；正确 key 必定还原原始 `Instr`；错误 key 必定失败。
+- 向后兼容：密文为空时行为与 Issue 3 完全一致，旧测试零改动全绿。
+- 审计：`DECRYPT_DECODE_FAIL` 必须写入 `audit_log`，内容含 `pc`、`context_handle`、`key_id`。
+- 密文长度必须与 `program.code.size()` 一致（由执行器校验）。
+- `ExecuteOptions` 新增成员必须用指针或有默认值的类型，不可用引用（兼容现有调用点）。
+
+#### 测试计划（测试名 + 核心断言点）
+- `Execute_PseudoDecrypt_CorrectKey_RunsToHalt`：EWC allow + 正确 `key_id` → 程序正常到 `HALT`。
+- `Execute_PseudoDecrypt_WrongKey_TrapsDecryptDecodeFail`：同一密文用错误 `key_id` 执行 → `trap.reason == DECRYPT_DECODE_FAIL` + `audit_log` 非空 + `msg` 含 `pc`/`context_handle`/`key_id`。
+- `Execute_PseudoDecrypt_TamperedCiphertext_TrapsDecryptDecodeFail`：破坏密文字节 → 解密后校验失败 → `DECRYPT_DECODE_FAIL`。
+- 兼容回归：Issue 0-3 全部旧测试继续通过（`ciphertext = nullptr` 路径）。
+
+#### 验收命令（仅列出，将由用户批准后执行）
+- cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+- cmake --build build
+- ctest --test-dir build
+- ./build/demo_normal
+
+#### Codex 可行性检查结果摘要
+- `EwcQueryResult` 已包含 `key_id`，executor 未消费——需要让 `FetchPacket` 携带 `key_id`。
+- `FetchStage → DecodeStage` 之间插入点存在，`DecodeStage` 有 Issue 4 hook 注释。但 `DecodeStage` 当前不能失败，需改造。
+- `ExecuteOptions` 可安全扩展（指针/默认值成员）。
+- 审计路径需新增（当前只有 `EWC_ILLEGAL_PC` 一条）。
+- CMakeLists.txt 无冲突，命名空间干净。
+
+### 实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 改动摘要（diff 风格）
+- `include/security/code_codec.hpp`：新增，定义 `CipherInstrUnit` / `CipherProgram` / `EncryptProgram` / `DecryptInstr`
+- `src/security/code_codec.cpp`：新增，约 190 行，实现共享密文格式、toy XOR 掩码、`key_check` 与 `tag` 校验
+- `include/core/executor.hpp`：扩展 `TrapReason::DECRYPT_DECODE_FAIL`，`ExecuteOptions` 新增 `ciphertext` 指针
+- `src/core/executor.cpp`：改造 Fetch/Decode 管线，消费 EWC `key_id`，新增解密失败 trap/audit 与密文长度校验
+- `tests/test_executor.cpp`：新增 3 个伪解密测试，旧测试保持通过
+- `demos/normal/demo_normal.cpp`：改为演示“正确 key → HALT / 错误 key → DECRYPT_DECODE_FAIL”
+- `CMakeLists.txt`：纳入 `src/security/code_codec.cpp`
+
+#### 关键文件逐条复盘
+- `include/security/code_codec.hpp`：定义密文单元与加解密接口；同一格式同时服务工具链侧加密和硬件侧解密。
+- `src/security/code_codec.cpp`：把 `Instr` 序列化到固定 payload，使用按 `(key_id, pc, byte_index)` 生成的确定性 XOR 掩码加密，并用 `key_check` + `tag` 保证错 key 和篡改都会失败。
+- `include/core/executor.hpp`：公开新的 trap 原因与可选密文输入，保持 `nullptr` 明文路径向后兼容。
+- `src/core/executor.cpp`：固定执行顺序为“PC 校验 → EWC query → 取密文/明文 → 解密校验 → Execute”；解密失败时生成 `DECRYPT_DECODE_FAIL` trap 和审计日志；同时记录 `context_handle` trace。
+- `tests/test_executor.cpp`：覆盖正确 key、错误 key、篡改密文三条路径，并验证 trap/audit/msg 诊断字段。
+- `demos/normal/demo_normal.cpp`：输出 `FINAL_REASON`、审计流和 `CTX context_handle=...`，满足 demo 可观测性要求。
+- `CMakeLists.txt`：让核心库、测试和 demo 都链接到新 codec 实现。
+
+#### 行为变化总结
+- 新增能力：
+  - 执行器支持可选密文模式；EWC allow 后会基于返回的 `key_id` 在 Decode 前解密指令。
+  - 新增 `DECRYPT_DECODE_FAIL` trap，并把 `pc`、`context_handle`、`key_id` 写入审计日志。
+  - `demo_normal` 现在能演示“正确 key 正常执行”和“错误 key 解密失败”两条路径。
+- 失败模式/Trap：
+  - `ciphertext` 长度与 `program.code.size()` 不一致时抛 `std::runtime_error`。
+  - 错误 `key_id` 会命中 `detail=key_check_mismatch`。
+  - 篡改密文会命中 `detail=tag_mismatch`。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+  - `cmake --build build`
+  - `ctest --test-dir build`
+  - `./build/demo_normal`
+- 已通过测试：
+  - `sanity`
+  - `isa_assembler`
+  - `executor`（3/3 通过）
+  - `demo_normal`：`[CASE_A_ALLOW] FINAL_REASON=HALT`，`[CASE_B_WRONG_KEY] FINAL_REASON=DECRYPT_DECODE_FAIL`
+
+#### 已知限制 & 下一步建议
+- 当前仅实现 L0 toy scheme，不提供真实密码学强度。
+- `key_check` 与 `tag` 只服务原型验证，后续若进入更高保真版本，需要替换为正式的签名/MAC 机制。
+- `context_trace` 目前记录执行入口的 `context_handle`，真正的跨上下文切换细节仍待后续 demo/调度路径接入。
+
+### 实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 改动摘要（diff 风格）
+- `tests/test_executor.cpp`：新增 1 个测试，约 30 行，覆盖 `ciphertext_size_mismatch` 异常路径
+- `docs/project_log.md`：追加本次实现复盘
+
+#### 关键文件逐条复盘
+- `tests/test_executor.cpp`：新增 `Execute_PseudoDecrypt_CiphertextSizeMismatch_Throws`，先构造 3 条指令的 `AsmProgram`，再通过 `EncryptProgram` 生成密文并删掉 1 个单元，验证 `ExecuteProgram` 抛出 `std::runtime_error` 且消息包含 `ciphertext_size_mismatch`。
+- `docs/project_log.md`：记录本次增量测试补充、执行命令与验证结果，保留历史实现记录不变。
+
+#### 行为变化总结
+- 新增能力：
+  - 锁定伪解密入口的密文长度校验行为，防止 `CipherProgram` 与 `AsmProgram` 长度不一致时静默进入执行流程。
+- 失败模式/Trap：
+  - 当 `options.ciphertext->size() != program.code.size()` 时，`ExecuteProgram` 抛出包含 `ciphertext_size_mismatch` 的 `std::runtime_error`。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+  - `cmake --build build`
+  - `ctest --test-dir build`
+- 已通过测试：
+  - `sanity`
+  - `isa_assembler`
+  - `executor`（3/3 通过）
+
+#### 已知限制 & 下一步建议
+- 本次只补充异常路径测试，没有修改执行器逻辑。
+- 若后续继续扩展密文校验，建议补充 `code_size=0`、空密文和更细粒度消息字段断言。
