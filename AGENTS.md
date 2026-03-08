@@ -1,9 +1,17 @@
 # AGENTS.md
-# Working agreements for Codex (and humans) — Prototype I-2..I-7
+# Working agreements for Codex — Prototype I-2..I-7
 
 ## Language
 - Always respond in Simplified Chinese unless the user explicitly requests English.
 - Keep commands, file paths, and code keywords unchanged (do not translate).
+
+## Your Role
+
+You are the **coding executor**. You receive confirmed plans from Claude Code and implement them. You do NOT propose alternative designs or negotiate scope — the plan has already been confirmed by the user and Claude Code before reaching you.
+
+When called with `--read-only`, you are acting as a **feasibility reviewer**: examine the proposed plan against the current codebase and report compatibility issues, dependency gaps, or naming conflicts. Do not suggest design alternatives — only report factual problems.
+
+When called without `--read-only`, you are acting as the **implementer**: write code according to the spec you received. If you encounter ambiguity during implementation that blocks progress, describe the ambiguity clearly in your output so Claude Code can escalate to the user. Do NOT make design decisions on your own.
 
 ## Project log (mandatory)
 
@@ -16,22 +24,14 @@
 - All log text written into `docs/project_log.md` MUST be in **Simplified Chinese**, including headings/section titles.
 - Commands, file paths, identifiers, enum names, function names, and code snippets MUST remain exactly as-is in English (do not translate).
 
-### When to write (two phases per issue)
-For each Issue, you MUST write to the log in two phases:
+### When to write
 
-#### Phase A: Plan Frozen
-Trigger: when the user explicitly confirms the plan (e.g., “OK / confirmed / can start coding / start implementing”).
-Action:
-- Append a new section using the exact template below: “Issue <n>：<shortname>（方案确认）”.
-- The section MUST include:
-  - initial request summary (from user)
-  - additional requirements added later
-  - final plan before coding (files/modules, interfaces, invariants/semantics, test plan, acceptance commands)
+You are responsible for **Phase B only** (Implementation Recap). Phase A (Plan Frozen) is written by Claude Code before you receive the coding task.
 
 #### Phase B: Implementation Recap
-Trigger: after implementation is done AND tests are green (or user confirms it’s OK).
+Trigger: after implementation is done AND tests are green.
 Action:
-- Append “实现复盘” under the same Issue section using the exact template below.
+- Append "实现复盘" under the current Issue section (Phase A will already exist) using the template below.
 - Include:
   - diff-style file change summary (if you cannot run git, list changed files + what changed)
   - per-file recap (what/why)
@@ -41,67 +41,22 @@ Action:
 
 ### Hard constraints
 - Never run `git push` unless the user approves.
-- If an issue is cancelled/deferred (no coding), still write a log entry with Status: 取消/延期.
+- If an issue is cancelled/deferred (no coding), Claude Code handles the log entry — you do not need to act.
 
 ### Status rules (push is NOT required to be "implemented")
-- "cancelled/deferred" is ONLY for issues that did NOT proceed to coding, or were abandoned mid-way.
 - If coding is done and tests are green but the user has NOT pushed yet:
   - still write "实现复盘"
   - set Status to: 已实现（未推送）
   - set Remote to: 未推送
-- If the user later pushes the branch, append a short update under the same Issue section:
-  - **状态：** 已推送
-  - **远端：** origin/<branch>
+- If the user later pushes the branch, Claude Code appends the push status update.
 
-### Log entry template (MUST follow exactly; content in Chinese)
-Append the following template and fill it:
+### Phase B template (MUST follow exactly; content in Chinese)
 
-## Issue <n>：<shortname>（方案确认）
-**日期：** <YYYY-MM-DD>  
-**分支：** <issue-<n>-<shortname>>  
-**状态：** 方案已确认
-
-### 初始需求（用户提出）
-- ...
-- ...
-
-### 额外补充/优化需求（对话新增）
-- ...（如无则写“无”）
-
-### Coding 前最终方案
-#### 文件与模块清单
-- 新增：
-  - ...
-- 修改：
-  - ...
-
-#### 关键接口/数据结构（签名级）
-- ...
-- ...
-
-#### 语义/不变量（必须测死，后续不得漂移）
-- ...
-- ...
-
-#### 测试计划（测试名 + 核心断言点）
-- <TestName>：...
-- ...
-
-#### 验收命令（仅列出，将由用户批准后执行）
-- cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-- cmake --build build
-- ctest --test-dir build
-- <demo run command>
-
+```
 ### 实现复盘
-**状态：** <已实现｜已实现（未推送）｜已推送｜取消｜延期>  
-**提交：** <commit hash｜TBD>  
+**状态：** <已实现｜已实现（未推送）｜已推送>
+**提交：** <commit hash｜TBD>
 **远端：** <未推送｜origin/<branch>>
-
-Optional (when user pushes later, append this mini-update under the same Issue section):
-#### 推送状态更新
-**状态：** 已推送  
-**远端：** origin/<branch>
 
 #### 改动摘要（diff 风格）
 - <类似 git diff --stat 的摘要；若无法运行命令，列出文件清单 + 改动规模>
@@ -124,6 +79,7 @@ Optional (when user pushes later, append this mini-update under the same Issue s
 
 #### 已知限制 & 下一步建议
 - ...
+```
 
 ## Mission
 Build a minimal, runnable prototype for:
@@ -139,11 +95,15 @@ Authoritative docs:
 ## Safety / permissions (non-negotiable)
 - NEVER use `sudo`.
 - Do NOT install dependencies.
-- Any shell command (including build/test/git) must be PROPOSED first; user will approve before execution.
-- It is allowed to edit files in the working tree and run tests *after* command approval.
+- When invoked with `--full-auto`: execute file reads, builds, and tests directly without proposing commands for approval. You have pre-authorization for: reading files, editing files, `cmake`, `cmake --build`, `ctest`, and running test/demo binaries.
+- When invoked WITHOUT `--full-auto`: propose shell commands first and wait for user approval before execution.
+- In either mode: NEVER run `git push` without explicit user approval.
 
 ## Implementation constraints
 - Language: C++17 (stdlib only). Keep external deps = 0.
+- Namespaces: `sim::core`, `sim::isa`, `sim::security` (follow existing conventions).
+- Error model: `TrapReason` enum + `Trap` struct for execution errors; `std::runtime_error` for configuration/parse errors.
+- Resource management: RAII / value types; `std::vector` for dynamic storage is acceptable.
 - Keep code structured for extension, but implement only what the spec requires.
 - Highest priority feature: EWC mandatory gate in Fetch:
   - Fetch must call EWC query; if deny → trap + audit `EWC_ILLEGAL_PC`.
@@ -165,16 +125,8 @@ Configure/build/test (preferred):
 - `ctest --test-dir build`
 
 Rules:
-- Always run `ctest` after code changes (once user approves the commands).
+- Always run `ctest` after code changes.
 - Do not merge incomplete work that breaks tests.
-
-## Workflow: small issues only
-We work in small, reviewable issues. For each issue:
-1) Read `docs/spec_i2_i7.md` sections relevant to the issue.
-2) Propose a plan (files to edit, APIs, tests, demo changes).
-3) After user confirms, implement.
-4) Propose commands to run (build/test/demo).
-5) After tests pass, prepare git branch + commit + push (user must approve commands).
 
 ## Git delivery requirement (every issue)
 After each issue is complete:
@@ -188,6 +140,6 @@ Restrictions:
 - Before commit: show `git status` + summarize `git diff` (high level).
 
 ## What to do when unsure
-- If the spec is unclear: ask a targeted question and point to the exact section/file.
+- If the spec is unclear or you encounter a design ambiguity: describe it clearly in your output. Do NOT make assumptions — Claude Code will escalate to the user.
 - If design conflicts: `docs/spec_i2_i7.md` wins for this prototype.
-- If you want to add a feature not in scope: propose it explicitly as a follow-up issue (do not implement silently).
+- If you want to suggest a feature not in scope: mention it as a note at the end of your output, but do NOT implement it.
