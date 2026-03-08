@@ -508,9 +508,9 @@
 - CMakeLists.txt 无冲突，命名空间干净。
 
 ### 实现复盘
-**状态：** 已实现（未推送）
-**提交：** TBD
-**远端：** 未推送
+**状态：** 已推送
+**提交：** 34d8137
+**远端：** origin/issue-4-decrypt-before-decode
 
 #### 改动摘要（diff 风格）
 - `include/security/code_codec.hpp`：新增，定义 `CipherInstrUnit` / `CipherProgram` / `EncryptProgram` / `DecryptInstr`
@@ -558,9 +558,9 @@
 - `context_trace` 目前记录执行入口的 `context_handle`，真正的跨上下文切换细节仍待后续 demo/调度路径接入。
 
 ### 实现复盘
-**状态：** 已实现（未推送）
-**提交：** TBD
-**远端：** 未推送
+**状态：** 已推送
+**提交：** 34d8137
+**远端：** origin/issue-4-decrypt-before-decode
 
 #### 改动摘要（diff 风格）
 - `tests/test_executor.cpp`：新增 1 个测试，约 30 行，覆盖 `ciphertext_size_mismatch` 异常路径
