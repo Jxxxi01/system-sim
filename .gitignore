@@ -1,3 +1,9 @@
 build/
 *.swp
 .vscode/
+.claude/
+mem/
+*.log
+step*_prompt*.txt
+step*_prompt*.md
+*_old.md
