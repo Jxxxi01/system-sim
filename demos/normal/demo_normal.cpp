@@ -1,19 +1,46 @@
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
+#include "security/audit.hpp"
 #include "security/code_codec.hpp"
-#include "security/ewc.hpp"
+#include "security/gateway.hpp"
+#include "security/hardware.hpp"
 
 namespace {
 
-void PrintArtifacts(const sim::core::ExecResult& result) {
-  for (const auto& event : result.audit_log) {
-    std::cout << "AUDIT " << event << '\n';
+std::string MakeSecureIrJson(const std::string& program_name, std::uint32_t user_id, std::uint64_t base_va,
+                             std::uint64_t end_va, std::uint32_t key_id, std::uint32_t window_id,
+                             const std::string& signature) {
+  std::ostringstream oss;
+  oss << "{"
+      << "\"program_name\":\"" << program_name << "\","
+      << "\"user_id\":" << user_id << ","
+      << "\"signature\":\"" << signature << "\","
+      << "\"base_va\":" << base_va << ","
+      << "\"windows\":[{"
+      << "\"window_id\":" << window_id << ","
+      << "\"start_va\":" << base_va << ","
+      << "\"end_va\":" << end_va << ","
+      << "\"key_id\":" << key_id << ","
+      << "\"type\":\"CODE\","
+      << "\"code_policy_id\":1"
+      << "}],"
+      << "\"pages\":[],"
+      << "\"cfi_level\":0,"
+      << "\"call_targets\":[],"
+      << "\"jmp_targets\":[]"
+      << "}";
+  return oss.str();
+}
+
+void PrintArtifacts(const sim::core::ExecResult& result, const sim::security::AuditCollector& audit) {
+  for (const auto& event : audit.GetEvents()) {
+    std::cout << "AUDIT " << sim::security::FormatAuditEvent(event) << '\n';
   }
   for (const auto& trace : result.context_trace) {
     std::cout << "CTX " << trace << '\n';
@@ -36,52 +63,40 @@ start:
     const std::uint64_t base_va = 0x1000;
     const sim::isa::AsmProgram program = sim::isa::AssembleText(source, base_va);
     const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 11);
+    const std::uint64_t end_va = base_va + program.code.size() * sim::isa::kInstrBytes;
 
-    sim::security::EwcTable ewc_allow;
-    if (!program.code.empty()) {
-      sim::security::ExecWindow allow_all;
-      allow_all.window_id = 1;
-      allow_all.start_va = base_va;
-      allow_all.end_va = base_va + program.code.size() * sim::isa::kInstrBytes;
-      allow_all.owner_user_id = 1;
-      allow_all.key_id = 11;
-      allow_all.type = sim::security::ExecWindowType::CODE;
-      allow_all.code_policy_id = 1;
-      ewc_allow.SetWindows(1, std::vector<sim::security::ExecWindow>{allow_all});
-    }
+    sim::security::SecurityHardware hardware;
+    sim::security::Gateway gateway(hardware);
+
+    hardware.GetAuditCollector().Clear();
+    const sim::security::ContextHandle allow_handle =
+        gateway.Load(MakeSecureIrJson("demo_normal_allow", 1, base_va, end_va, 11, 1, "stub-valid"));
 
     sim::core::ExecuteOptions allow_options;
-    allow_options.context_handle = 1;
-    allow_options.ewc = &ewc_allow;
+    allow_options.context_handle = allow_handle;
+    allow_options.ewc = &hardware.GetEwcTable();
+    allow_options.audit = &hardware.GetAuditCollector();
     allow_options.ciphertext = &ciphertext;
     const sim::core::ExecResult allow_result = sim::core::ExecuteProgram(program, base_va, allow_options);
 
     std::cout << "[CASE_A_ALLOW]\n";
     sim::core::PrintRunSummary(allow_result, std::cout);
-    PrintArtifacts(allow_result);
+    PrintArtifacts(allow_result, hardware.GetAuditCollector());
 
-    sim::security::EwcTable ewc_wrong_key;
-    if (!program.code.empty()) {
-      sim::security::ExecWindow wrong_key;
-      wrong_key.window_id = 2;
-      wrong_key.start_va = base_va;
-      wrong_key.end_va = base_va + program.code.size() * sim::isa::kInstrBytes;
-      wrong_key.owner_user_id = 1;
-      wrong_key.key_id = 99;
-      wrong_key.type = sim::security::ExecWindowType::CODE;
-      wrong_key.code_policy_id = 1;
-      ewc_wrong_key.SetWindows(2, std::vector<sim::security::ExecWindow>{wrong_key});
-    }
+    hardware.GetAuditCollector().Clear();
+    const sim::security::ContextHandle wrong_key_handle =
+        gateway.Load(MakeSecureIrJson("demo_normal_wrong_key", 1, base_va, end_va, 99, 2, "stub-valid"));
 
     sim::core::ExecuteOptions wrong_key_options;
-    wrong_key_options.context_handle = 2;
-    wrong_key_options.ewc = &ewc_wrong_key;
+    wrong_key_options.context_handle = wrong_key_handle;
+    wrong_key_options.ewc = &hardware.GetEwcTable();
+    wrong_key_options.audit = &hardware.GetAuditCollector();
     wrong_key_options.ciphertext = &ciphertext;
     const sim::core::ExecResult wrong_key_result =
         sim::core::ExecuteProgram(program, base_va, wrong_key_options);
     std::cout << "[CASE_B_WRONG_KEY]\n";
     sim::core::PrintRunSummary(wrong_key_result, std::cout);
-    PrintArtifacts(wrong_key_result);
+    PrintArtifacts(wrong_key_result, hardware.GetAuditCollector());
 
     return (allow_result.trap.reason == sim::core::TrapReason::HALT &&
             wrong_key_result.trap.reason == sim::core::TrapReason::DECRYPT_DECODE_FAIL)

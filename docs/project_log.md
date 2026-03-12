@@ -589,3 +589,244 @@
 #### 已知限制 & 下一步建议
 - 本次只补充异常路径测试，没有修改执行器逻辑。
 - 若后续继续扩展密文校验，建议补充 `code_size=0`、空密文和更细粒度消息字段断言。
+
+## Issue 5：Gateway + SecureIR（方案确认）
+**日期：** 2026-03-09
+**分支：** issue-5-gateway-secureir
+**状态：** 方案已确认
+
+### 初始需求（用户提出）
+- 实现 Gateway 模拟器：解析 SecureIR → 验签(stub) → 配置 EWC 窗口 → 分配 `context_handle` → 返回。
+- 引入 `SecurityHardware` 类统一持有片上安全硬件状态（EwcTable、AuditCollector）。
+- 引入 `AuditCollector` 作为统一审计落点，Gateway 和 Executor 都写入它。
+- `demo_normal` 改用 Gateway 启动，不再手工注入 EWC 窗口。
+
+### 额外补充/优化需求（对话新增）
+- SecureIR 与程序代码分离（选项 A）：JSON 只包含元数据，程序代码仍以汇编文本写在 demo 中。后续 Issue 11 可考虑统一。
+- JSON 解析器是 Gateway 内部实现，对应硬件 Gateway 解析二进制 blob 的状态机。整个模拟器阶段使用 JSON 格式。
+- `context_handle` 使用递增计数器，永不复用，避免残留引用攻击和审计混淆。
+- SecureIR schema 使用 `start_va/end_va`（与 `ExecWindow` 字段名一致），含 `pages` 占位字段为 Issue 7 PVT 预留。
+- Gateway 构造时注入 `SecurityHardware&`，语义上 Gateway 是芯片的一部分。
+- `ExecuteOptions::ewc` 保持 `const EwcTable*`，新增 `AuditCollector* audit`。Executor 只依赖它实际需要的组件，不依赖整个 `SecurityHardware`。
+- 删除 `ExecResult::audit_log`，统一从 `AuditCollector` 读取审计事件。
+- 窗口读回接口不加，留注释说明后续必要时再加。
+
+### Coding 前最终方案
+#### 文件与模块清单
+- 新增：
+  - `include/security/hardware.hpp`（SecurityHardware 类）
+  - `include/security/audit.hpp`（AuditCollector 类）
+  - `src/security/audit.cpp`
+  - `include/security/gateway.hpp`（Gateway 类）
+  - `src/security/gateway.cpp`（含内部 JSON 解析器）
+  - `tests/test_gateway.cpp`
+- 修改：
+  - `include/core/executor.hpp`（ExecuteOptions 新增 `AuditCollector*`，删除 `ExecResult::audit_log`）
+  - `src/core/executor.cpp`（审计事件改写 AuditCollector）
+  - `tests/test_executor.cpp`（适配审计接口变更）
+  - `demos/normal/demo_normal.cpp`（改用 Gateway 启动）
+  - `CMakeLists.txt`（纳入新增源文件和测试）
+
+#### 关键接口/数据结构（语义级）
+- `SecurityHardware`：
+  - 持有 `EwcTable` 和 `AuditCollector`
+  - `EwcTable& GetEwcTable()` / `const EwcTable& GetEwcTable() const`
+  - `AuditCollector& GetAuditCollector()` / `const AuditCollector& GetAuditCollector() const`
+- `AuditCollector`：
+  - `LogEvent(const std::string& event)`
+  - `GetEvents() -> const std::vector<std::string>&`
+  - `Clear()`
+- `Gateway`：
+  - `Gateway(SecurityHardware& hardware)`
+  - `Load(const std::string& json) -> ContextHandle`
+  - `Release(ContextHandle handle)` [stub，接口占位]
+  - `GetUserIdForHandle(ContextHandle) -> std::optional<uint32_t>`
+- `ExecuteOptions` 扩展：
+  - 新增 `AuditCollector* audit = nullptr`
+- `ExecResult` 变更：
+  - 删除 `audit_log` 字段
+
+#### SecureIR L0 JSON Schema
+```json
+{
+  "program_name": "demo_normal",
+  "user_id": 1,
+  "signature": "stub-valid",
+  "base_va": 4096,
+  "windows": [
+    {"window_id": 1, "start_va": 4096, "end_va": 8192, "key_id": 11, "type": "CODE", "code_policy_id": 1}
+  ],
+  "pages": [],
+  "cfi_level": 0,
+  "call_targets": [],
+  "jmp_targets": []
+}
+```
+- `signature`：stub 字段，Gateway 检查非空即通过
+- `pages`：占位字段，Issue 5 解析但不消费，为 Issue 7 PVT 预留
+- `cfi_level` / `call_targets` / `jmp_targets`：为 Issue 8 SPE 预留，Issue 5 解析但不消费
+
+#### 语义/不变量（必须测死，后续不得漂移）
+- `gateway.Load()` 成功后，对应 `context_handle` 的 EWC query 在合法 PC 范围内必须 allow。
+- `context_handle` 单调递增且永不复用，即使 `Release()` 后也不回收数值。
+- `handle → user_id` 映射在 load 后可通过 `GetUserIdForHandle()` 查询。
+- `signature` 为空或缺失 → 抛异常 + `GATEWAY_LOAD_FAIL` 审计。
+- `windows` 字段缺失或为空 → 抛异常 + `GATEWAY_LOAD_FAIL` 审计。
+- `windows` 重叠 → EWC 拒绝 → 抛异常 + `GATEWAY_LOAD_FAIL` 审计。
+- 非 `CODE` 类型 → 配置错误 → 抛异常 + `GATEWAY_LOAD_FAIL` 审计。
+- Gateway try/catch `SetWindows` 异常，先写审计再 rethrow；handle 映射在 `SetWindows` 成功后才写入。
+- 顶层 `user_id` 填充到每个 `ExecWindow.owner_user_id`。
+- 所有审计事件（Gateway/Executor）写入同一个 `AuditCollector`。
+- 向后兼容：Issue 0-4 全部旧测试适配后继续通过。
+
+#### 测试计划（测试名 + 核心断言点）
+- `Gateway_Load_ValidSecureIR_ConfiguresEwcAndReturnsHandle`：合法 JSON → handle 有效 → EWC query allow。
+- `Gateway_Load_MultipleCalls_UniqueHandles`：多次 load → handle 单调递增不重复。
+- `Gateway_Load_EmptySignature_Fails`：signature 为空 → 异常 + `GATEWAY_LOAD_FAIL` 审计。
+- `Gateway_Load_MissingWindows_Fails`：无 windows 字段 → 异常。
+- `Gateway_Load_EmptyWindows_Fails`：windows 为空数组 → 异常。
+- `Gateway_HandleToUserIdMapping_Correct`：load 后查 user_id 映射正确。
+- `Gateway_Load_OverlappingWindows_Fails`：重叠窗口 → 异常 + 审计。
+- `Gateway_Load_InvalidType_Fails`：非 CODE 类型 → 异常 + 审计。
+- `AuditCollector_UnifiedEvents`：Gateway 和 Executor 事件都出现在同一个 collector 中。
+- 兼容回归：Issue 0-4 全部旧测试适配后继续通过。
+
+#### 验收命令（仅列出，将由用户批准后执行）
+- `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+- `cmake --build build`
+- `ctest --test-dir build`
+- `./build/demo_normal`
+
+#### 设计决策记录
+
+**D-1：SecureIR 与程序代码分离**
+- 决策：SecureIR JSON 只包含元数据，不包含程序代码。
+- 原因：减少 Issue 5 改动范围，聚焦 Gateway 核心逻辑。
+- 后续：Issue 11 SecureIR 生成器可考虑统一格式。
+
+**D-2：JSON 解析器是 Gateway 内部实现**
+- 决策：JSON 解析器作为 Gateway 私有实现，不独立成模块。
+- 原因：对应硬件 Gateway 解析二进制 blob 的状态机；整个模拟器阶段使用 JSON 格式。
+
+**D-3：AuditCollector 是统一审计落点**
+- 决策：引入 AuditCollector，Gateway/Executor 都写入它，删除 ExecResult::audit_log。
+- 原因：对应片上统一审计链，所有安全模块写入同一条链。
+
+**D-4：context_handle 递增永不复用**
+- 决策：简单递增计数器，永不复用。
+- 原因：避免残留引用攻击和审计混淆；handle 可预测但安全（OS 可见但无法滥用）。
+- 后续：真实硬件应使用 64 位或 generation 机制。
+
+**D-5：SecureIR schema 字段命名与预留**
+- 决策：使用 `start_va/end_va`（与 ExecWindow 一致），含 `pages` 占位字段。
+- 原因：减少转换，为 Issue 7 PVT 预留。
+
+**D-6：SecurityHardware 统一持有片上状态**
+- 决策：引入 SecurityHardware 类持有 EwcTable 和 AuditCollector。
+- 原因：语义准确——代表芯片内部安全子系统状态；后续可扩展 PVT、SPE。
+
+**D-7：Gateway 构造时注入 SecurityHardware**
+- 决策：`Gateway(SecurityHardware&)` 构造时绑定。
+- 原因：Gateway 是芯片的一部分，始终操作同一个硬件实例。
+
+**D-8：ExecuteOptions 保持细粒度指针**
+- 决策：`ExecuteOptions::ewc` 保持 `const EwcTable*`，新增 `AuditCollector* audit`，不改成 `SecurityHardware*`。
+- 原因：Executor 只依赖它实际需要的组件，保持最小依赖。
+
+**D-9：窗口读回接口暂不添加**
+- 决策：不为 EwcTable 添加窗口读回接口，留注释说明。
+- 原因：非功能必需；测试通过 Query 行为间接验证。
+- 后续：必要时再加只读快照接口。
+
+### 实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 改动摘要（diff 风格）
+- 新增 6 个文件，修改 6 个文件
+- `include/security/{audit.hpp,hardware.hpp,gateway.hpp}`：新增统一审计器、片上安全硬件聚合和 Gateway 接口
+- `src/security/{audit.cpp,gateway.cpp}`：新增审计实现与 SecureIR L0 JSON 解析 / Gateway load 流程
+- `include/core/executor.hpp`、`src/core/executor.cpp`：删除 `ExecResult::audit_log`，新增 `ExecuteOptions::audit`，Executor 改写统一审计器
+- `tests/test_executor.cpp`、`tests/test_gateway.cpp`：适配新审计接口并新增 Gateway 测试覆盖
+- `demos/normal/demo_normal.cpp`、`CMakeLists.txt`：demo 改用 `SecurityHardware + Gateway` 启动，CMake 接入新源码与新测试
+
+#### 关键文件逐条复盘
+- `include/security/audit.hpp`、`src/security/audit.cpp`：实现 `AuditCollector::LogEvent/GetEvents/Clear`，作为 Gateway 和 Executor 的统一审计落点。
+- `include/security/hardware.hpp`：实现 `SecurityHardware`，统一持有 `EwcTable` 和 `AuditCollector`，为后续 PVT/SPE 扩展预留聚合点。
+- `include/security/gateway.hpp`、`src/security/gateway.cpp`：实现 `Gateway(SecurityHardware&)`、`Load/Release/GetUserIdForHandle`；内部手写最小 JSON 解析器，校验 SecureIR L0 schema，填充 `owner_user_id`，调用 `SetWindows`，分配单调递增且永不复用的 `context_handle`，统一写入 `GATEWAY_LOAD_OK/FAIL` 审计。
+- `include/core/executor.hpp`、`src/core/executor.cpp`：移除 `ExecResult::audit_log`，将 `EWC_ILLEGAL_PC` 和 `DECRYPT_DECODE_FAIL` 事件改写到 `options.audit`；`PrintRunSummary` 不再从结果对象统计 audit 数量。
+- `tests/test_executor.cpp`：改为显式创建 `AuditCollector` 并断言 `GetEvents()` 内容，保持 Issue 0-4 语义回归。
+- `tests/test_gateway.cpp`：新增 Gateway 成功路径、空签名、缺失/空 windows、重叠窗口、非法 type、handle→user_id 映射、统一审计链等测试。
+- `demos/normal/demo_normal.cpp`：不再手工注入 EWC；通过 Gateway 生成 `context_handle`，并打印统一审计流与 `context_handle` trace。
+- `CMakeLists.txt`：接入 `audit.cpp`、`gateway.cpp` 和 `test_gateway`。
+
+#### 行为变化总结
+- 新增能力：
+  - 可通过 `Gateway::Load()` 直接从 SecureIR JSON 配置 EWC，并返回 `context_handle`。
+  - `SecurityHardware` 统一承载安全硬件状态，demo/test 不再各自拼装散落组件。
+  - Gateway 与 Executor 的审计事件进入同一个 `AuditCollector`。
+- 失败模式/Trap：
+  - `signature` 缺失或为空、`windows` 缺失或为空、窗口 `type != CODE`、EWC 窗口重叠/非法区间都会触发 `GATEWAY_LOAD_FAIL` 并抛出 `std::runtime_error`。
+  - Executor 在 Fetch deny 和伪解密失败时继续分别触发 `EWC_ILLEGAL_PC` / `DECRYPT_DECODE_FAIL`，但事件改为写入 `AuditCollector`。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+  - `cmake --build build`
+  - `ctest --test-dir build --output-on-failure`
+  - `./build/demo_normal`
+- 已通过测试：
+  - `sanity`
+  - `isa_assembler`
+  - `executor`
+  - `gateway`
+  - `demo_normal` 运行成功，输出 allow / wrong-key 两条路径的 trap reason、audit stream、context trace
+
+#### 已知限制 & 下一步建议
+- `Gateway::Release()` 仍是 stub/no-op，占位到后续 issue 再接入真正的上下文释放与硬件状态清理。
+- 当前 JSON 解析器只覆盖 SecureIR L0 需要的 object/array/string/无符号整数子集，不支持通用 JSON 全量语法。
+- `pages`、`cfi_level`、`call_targets`、`jmp_targets` 目前只解析校验、不参与运行时行为；后续分别由 PVT / SPE issue 消费。
+
+### 实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 改动摘要（diff 风格）
+- 本次代码评审修复实际触达 9 个文件：`include/security/audit.hpp`、`src/security/audit.cpp`、`include/security/ewc.hpp`、`src/security/ewc.cpp`、`include/security/gateway.hpp`、`src/security/gateway.cpp`、`src/core/executor.cpp`、`tests/test_executor.cpp`、`tests/test_gateway.cpp`
+- `audit`：`vector<string>` 升级为 `vector<AuditEvent>`，新增单调 `seq_no` 与结构化 `LogEvent(...)`
+- `gateway/ewc`：补齐 `Release()`、`EwcTable::ClearWindows()`、`kMaxContextHandles = 256` 并发上限
+- `executor/tests/demo`：所有审计写入点与断言改为结构化字段；`demo_normal` 输出格式改为结构化审计事件
+
+#### 关键文件逐条复盘
+- `include/security/audit.hpp`、`src/security/audit.cpp`：新增 `AuditEvent{seq_no,type,user_id,context_handle,pc,detail}`，collector 统一分配递增序号；`Clear()` 只清空缓存，不回绕序号。
+- `include/security/ewc.hpp`、`src/security/ewc.cpp`：新增 `ClearWindows(context_handle)`，供 Gateway release 清理上下文窗口。
+- `include/security/gateway.hpp`、`src/security/gateway.cpp`：加入 `kMaxContextHandles = 256` 模拟上限；`Load()` 在活跃 handle 达上限时抛 `gateway_capacity_exceeded`；`Release()` 现在会移除 `handle_to_user_` 映射、清空 EWC 窗口并记录 `GATEWAY_RELEASE`。
+- `src/core/executor.cpp`：`EWC_ILLEGAL_PC` 与 `DECRYPT_DECODE_FAIL` 改为结构化审计；解密失败事件现在携带窗口 owner 的 `user_id`、`pc`、`context_handle` 和 `key_id` 细节。
+- `tests/test_gateway.cpp`：旧字符串匹配断言改为字段级断言；新增 release 后映射/窗口清理和 handle 永不复用测试；新增 256 并发上限溢出测试。
+- `tests/test_executor.cpp`：改为断言 `AuditEvent.type/user_id/context_handle/pc/detail`，锁定 Fetch deny 与伪解密失败的结构化输出。
+
+#### 行为变化总结
+- 新增能力：
+  - `Gateway::Release()` 真正释放上下文相关状态，并写入 `GATEWAY_RELEASE`。
+  - Gateway 最多允许 256 个并发活跃 `context_handle`；超过上限时拒绝新 load。
+  - 审计日志现在是结构化事件，调用方可直接按字段检查，不再依赖字符串拼接格式。
+- 失败模式/Trap：
+  - 活跃 handle 数达到 256 后，`Gateway::Load()` 抛出 `std::runtime_error`，并记录 `GATEWAY_LOAD_FAIL`，`detail` 含 `gateway_capacity_exceeded`。
+  - `Release()` 后，原 handle 的 EWC 查询不再命中窗口，`GetUserIdForHandle()` 返回 `nullopt`；后续新 load 分配新 handle，不回收旧值。
+  - `EWC_ILLEGAL_PC` / `DECRYPT_DECODE_FAIL` trap 语义不变，但审计载荷从自由字符串改为固定字段 + `detail` kv。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - `cmake --build build`
+  - `ctest --test-dir build`
+- 已通过测试：
+  - `sanity`
+  - `isa_assembler`
+  - `executor`
+  - `gateway`
+
+#### 已知限制 & 下一步建议
+- 当前 `GATEWAY_LOAD_FAIL` 在解析失败和容量溢出路径下统一写 `user_id=0`、`pc=0`；如果后续需要更强可观测性，可以在 parse 前后分阶段携带更多上下文。
+- `detail` 仍是 kv 字符串而非独立 map，适合当前原型与 stdout 输出；若后续引入 NDJSON，可再升级为稳定序列化器。

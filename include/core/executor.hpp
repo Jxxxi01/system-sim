@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "isa/assembler.hpp"
+#include "security/audit.hpp"
 #include "security/code_codec.hpp"
 #include "security/ewc.hpp"
 
@@ -39,7 +40,6 @@ struct CpuState {
 struct ExecResult {
   Trap trap;
   CpuState state;
-  std::vector<std::string> audit_log;
   std::vector<std::string> context_trace;
   std::vector<std::string> syscall_log;
 };
@@ -49,6 +49,7 @@ struct ExecuteOptions {
   std::size_t max_steps = 1000000;
   sim::security::ContextHandle context_handle = 0;
   const sim::security::EwcTable* ewc = nullptr;
+  sim::security::AuditCollector* audit = nullptr;
   const sim::security::CipherProgram* ciphertext = nullptr;
 };
 

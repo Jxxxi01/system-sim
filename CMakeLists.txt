@@ -37,7 +37,9 @@ add_library(simulator_core STATIC
   src/isa/assembler.cpp
   src/isa/scaffold.cpp
   src/security/code_codec.cpp
+  src/security/audit.cpp
   src/security/ewc.cpp
+  src/security/gateway.cpp
   src/security/scaffold.cpp
   src/kernel/scaffold.cpp
 )
@@ -80,6 +82,17 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME executor COMMAND test_executor)
+
+  add_executable(test_gateway
+    tests/test_gateway.cpp
+  )
+
+  target_link_libraries(test_gateway
+    PRIVATE
+      simulator_core
+  )
+
+  add_test(NAME gateway COMMAND test_gateway)
 endif()
 
 add_executable(demo_normal

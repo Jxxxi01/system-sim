@@ -34,6 +34,7 @@ struct EwcQueryResult {
 class EwcTable {
  public:
   void SetWindows(ContextHandle context_handle, std::vector<ExecWindow> windows);
+  void ClearWindows(ContextHandle context_handle);
   EwcQueryResult Query(std::uint64_t pc, ContextHandle context_handle) const;
 
  private:

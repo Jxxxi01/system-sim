@@ -36,6 +36,8 @@ void EwcTable::SetWindows(ContextHandle context_handle, std::vector<ExecWindow> 
   windows_by_context_[context_handle] = std::move(windows);
 }
 
+void EwcTable::ClearWindows(ContextHandle context_handle) { windows_by_context_.erase(context_handle); }
+
 EwcQueryResult EwcTable::Query(std::uint64_t pc, ContextHandle context_handle) const {
   EwcQueryResult result;
 

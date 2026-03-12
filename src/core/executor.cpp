@@ -21,6 +21,7 @@ struct FetchPacket {
   std::uint64_t pc = 0;
   std::uint64_t next_pc = 0;
   std::size_t index = 0;
+  std::uint32_t owner_user_id = 0;
   std::uint32_t key_id = 0;
   bool has_cipher = false;
   sim::isa::Instr instr;
@@ -48,11 +49,9 @@ std::string MakeEwcDenyMsg(std::uint64_t pc, sim::security::ContextHandle contex
   return oss.str();
 }
 
-std::string MakeEwcDenyAudit(std::uint64_t pc, sim::security::ContextHandle context_handle,
-                             const sim::security::EwcQueryResult& query_result) {
+std::string MakeEwcDenyDetail(const sim::security::EwcQueryResult& query_result) {
   std::ostringstream oss;
-  oss << "EWC_ILLEGAL_PC"
-      << " pc=" << pc << " context_handle=" << context_handle << " window_id=";
+  oss << "window_id=";
   if (query_result.matched_window) {
     oss << query_result.window_id;
   } else {
@@ -70,12 +69,9 @@ std::string MakeDecryptFailMsg(std::uint64_t pc, sim::security::ContextHandle co
   return oss.str();
 }
 
-std::string MakeDecryptFailAudit(std::uint64_t pc, sim::security::ContextHandle context_handle,
-                                 std::uint32_t key_id, std::string_view detail) {
+std::string MakeDecryptFailDetail(std::uint32_t key_id, std::string_view detail) {
   std::ostringstream oss;
-  oss << "DECRYPT_DECODE_FAIL"
-      << " pc=" << pc << " context_handle=" << context_handle << " key_id=" << key_id
-      << " detail=" << detail;
+  oss << "key_id=" << key_id << " reason=" << detail;
   return oss.str();
 }
 
@@ -131,7 +127,7 @@ bool AddPcRelative(std::uint64_t next_pc, std::int64_t imm, std::uint64_t* out_p
 bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc,
                 const sim::security::EwcTable& ewc, sim::security::ContextHandle context_handle,
                 const sim::security::CipherProgram* ciphertext, FetchPacket* packet, Trap* trap,
-                std::string* deny_audit) {
+                std::string* deny_detail) {
   const std::uint64_t base_va = program.base_va;
   const std::size_t code_size = program.code.size();
 
@@ -159,13 +155,14 @@ bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc,
   const sim::security::EwcQueryResult query_result = ewc.Query(pc, context_handle);
   if (!query_result.allow) {
     *trap = Trap{TrapReason::EWC_ILLEGAL_PC, pc, MakeEwcDenyMsg(pc, context_handle, query_result)};
-    *deny_audit = MakeEwcDenyAudit(pc, context_handle, query_result);
+    *deny_detail = MakeEwcDenyDetail(query_result);
     return false;
   }
 
   packet->pc = pc;
   packet->next_pc = pc + sim::isa::kInstrBytes;
   packet->index = static_cast<std::size_t>(index);
+  packet->owner_user_id = query_result.owner_user_id;
   packet->key_id = query_result.key_id;
   packet->has_cipher = (ciphertext != nullptr);
   if (packet->has_cipher) {
@@ -178,7 +175,7 @@ bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc,
 }
 
 bool DecodeStage(const FetchPacket& packet, sim::security::ContextHandle context_handle, sim::isa::Instr* instr,
-                 Trap* trap, std::string* decrypt_audit) {
+                 Trap* trap, std::string* decrypt_detail) {
   if (!packet.has_cipher) {
     *instr = packet.instr;
     return true;
@@ -189,8 +186,7 @@ bool DecodeStage(const FetchPacket& packet, sim::security::ContextHandle context
   if (!decrypt_result.ok) {
     *trap = Trap{TrapReason::DECRYPT_DECODE_FAIL, packet.pc,
                  MakeDecryptFailMsg(packet.pc, context_handle, packet.key_id, decrypt_result.detail)};
-    *decrypt_audit =
-        MakeDecryptFailAudit(packet.pc, context_handle, packet.key_id, decrypt_result.detail);
+    *decrypt_detail = MakeDecryptFailDetail(packet.key_id, decrypt_result.detail);
     return false;
   }
 
@@ -231,6 +227,13 @@ void Store64LE(std::vector<std::uint8_t>* mem, std::uint64_t addr, std::uint64_t
 
 }  // namespace
 
+void LogAudit(sim::security::AuditCollector* audit, std::string type, std::uint32_t user_id,
+              sim::security::ContextHandle context_handle, std::uint64_t pc, std::string detail) {
+  if (audit != nullptr) {
+    audit->LogEvent(std::move(type), user_id, context_handle, pc, std::move(detail));
+  }
+}
+
 ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc,
                           const ExecuteOptions& options) {
   if (options.ciphertext != nullptr && options.ciphertext->size() != program.code.size()) {
@@ -270,11 +273,11 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
 
     FetchPacket fetched;
     Trap fetch_trap;
-    std::string deny_audit;
+    std::string deny_detail;
     if (!FetchStage(program, result.state.pc, *options.ewc, options.context_handle, options.ciphertext,
-                    &fetched, &fetch_trap, &deny_audit)) {
-      if (!deny_audit.empty()) {
-        result.audit_log.push_back(std::move(deny_audit));
+                    &fetched, &fetch_trap, &deny_detail)) {
+      if (!deny_detail.empty()) {
+        LogAudit(options.audit, "EWC_ILLEGAL_PC", 0, options.context_handle, fetch_trap.pc, std::move(deny_detail));
       }
       result.trap = std::move(fetch_trap);
       break;
@@ -282,10 +285,11 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
 
     sim::isa::Instr instr;
     Trap decode_trap;
-    std::string decrypt_audit;
-    if (!DecodeStage(fetched, options.context_handle, &instr, &decode_trap, &decrypt_audit)) {
-      if (!decrypt_audit.empty()) {
-        result.audit_log.push_back(std::move(decrypt_audit));
+    std::string decrypt_detail;
+    if (!DecodeStage(fetched, options.context_handle, &instr, &decode_trap, &decrypt_detail)) {
+      if (!decrypt_detail.empty()) {
+        LogAudit(options.audit, "DECRYPT_DECODE_FAIL", fetched.owner_user_id, options.context_handle,
+                 decode_trap.pc, std::move(decrypt_detail));
       }
       result.trap = std::move(decode_trap);
       break;
@@ -506,7 +510,6 @@ void PrintRunSummary(const ExecResult& result, std::ostream& os) {
   os << "FINAL_REASON=" << TrapReasonToString(result.trap.reason) << '\n';
   os << "FINAL_PC=" << result.trap.pc << '\n';
   os << "SYSCALL_COUNT=" << result.syscall_log.size() << '\n';
-  os << "AUDIT_COUNT=" << result.audit_log.size() << '\n';
   os << "CTX_TRACE_COUNT=" << result.context_trace.size() << '\n';
 }
 
