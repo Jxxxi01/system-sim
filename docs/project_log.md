@@ -830,3 +830,8 @@
 #### 已知限制 & 下一步建议
 - 当前 `GATEWAY_LOAD_FAIL` 在解析失败和容量溢出路径下统一写 `user_id=0`、`pc=0`；如果后续需要更强可观测性，可以在 parse 前后分阶段携带更多上下文。
 - `detail` 仍是 kv 字符串而非独立 map，适合当前原型与 stdout 输出；若后续引入 NDJSON，可再升级为稳定序列化器。
+
+### Push 状态
+**已推送：** 2026-03-12
+**分支：** issue-5-gateway-secureir
+**提交：** issue 5: Gateway + SecureIR L0 + structured audit
