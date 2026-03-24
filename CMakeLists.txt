@@ -35,6 +35,7 @@ add_library(simulator_core STATIC
   src/core/executor.cpp
   src/core/scaffold.cpp
   src/isa/assembler.cpp
+  src/kernel/process.cpp
   src/isa/scaffold.cpp
   src/security/code_codec.cpp
   src/security/audit.cpp
@@ -93,6 +94,17 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME gateway COMMAND test_gateway)
+
+  add_executable(test_kernel_process
+    tests/test_kernel_process.cpp
+  )
+
+  target_link_libraries(test_kernel_process
+    PRIVATE
+      simulator_core
+  )
+
+  add_test(NAME kernel_process COMMAND test_kernel_process)
 endif()
 
 add_executable(demo_normal

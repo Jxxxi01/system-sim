@@ -988,3 +988,169 @@
 #### 已知限制 & 下一步建议
 - 当前 `region_base_va -> code_memory` 仍是单连续 region 映射，尚未覆盖多段 code image 或稀疏装载场景。
 - `RunAllowAll` 只保留在测试侧，后续若还需要无安全硬件的便捷运行入口，应由上层显式决定是否补新的 helper，而不是回退到 executor 对外兼容 wrapper。
+
+## Issue 6B：内核进程模型（方案确认）
+**日期：** 2026-03-24
+**分支：** issue-6b-kernel-process-model
+**状态：** 方案已确认
+
+### 初始需求（用户提出）
+- 在 Gateway 之上构建内核进程管理层，为后续 cross-user demo（6C）提供基础设施。
+- 实现进程上下文表、context_switch、审计事件。
+- 不修改 Executor，Executor 集成留给 6C。
+
+### 额外补充/优化需求（对话新增）
+- `ProcessContext` 不包含 `program_name`（真实硬件无此概念）。
+- code_memory 所有权归硬件层（SecurityHardware），不归内核 ProcessContext——内核不可信，不应持有受保护的数据。
+- ProcessContext 只持有 {handle, user_id, base_va}——内核合理需要的调度和地址空间管理信息。
+- base_va 由内核从 SecureIR JSON 明文头提取（DP-9：布局元数据明文）。
+- Gateway 不新增持久存储——Gateway 是"检查+配置"硬件，不是存储器。
+- `ContextSwitch` 幂等：切换到已 active 的同一 handle 静默成功，仍发 `CTX_SWITCH` 审计。
+- `LoadProcess` 接收 (secureir_json, code_memory) 两参数，code_memory 未嵌入 SecureIR 是已知简化（完整 SecureIR 包属于 I-1 范畴）。
+
+### Coding 前最终方案
+#### 文件与模块清单
+- 新增：
+  - `include/kernel/process.hpp`（`ProcessContext` + `KernelProcessTable` 声明）
+  - `src/kernel/process.cpp`（实现）
+  - `tests/test_kernel_process.cpp`（单元测试）
+- 修改：
+  - `include/security/hardware.hpp`（SecurityHardware 新增 per-handle code region 存储）
+  - `CMakeLists.txt`（接入新源码 + 测试）
+
+#### 语义接口（WHAT，签名由 Codex 决定）
+- **SecurityHardware 扩展**：新增 per-handle code region 存储（code_memory 字节 + base_va），提供存储和查询方法。模拟硬件保护的物理内存。
+- **`ProcessContext`**：持有 context_handle、user_id、base_va。不持有 code_memory（code_memory 归硬件层）。代表内核视角的进程信息。
+- **`KernelProcessTable`**：
+  - 构造时接收 `Gateway&`、`SecurityHardware&`、`AuditCollector&`。
+  - `LoadProcess`：接收 SecureIR JSON + code_memory（move 语义）→ 从 JSON 明文头提取 user_id 和 base_va → 把 code_memory move 给 SecurityHardware → 调用 `gateway.Load(json)` 获得 handle → 存储 ProcessContext{handle, user_id, base_va} → 返回 handle。
+  - `ReleaseProcess`：调用 `gateway.Release(handle)` → 从 SecurityHardware 移除 code region → 从进程表移除；若为 active，重置 active 为"无"。
+  - `ContextSwitch`：验证 handle 在进程表中存在 → 更新 active handle → 通过 AuditCollector 发出 `CTX_SWITCH` 审计事件（含 user_id + handle）。幂等：同一 handle 重复切换静默成功，仍发审计。
+  - `GetActiveProcess`：返回当前 active 进程的 ProcessContext 指针（无 active 时返回 nullptr）。
+  - `GetProcess`：按 handle 查询特定进程（不存在返回 nullptr）。
+- **namespace**：`sim::kernel`。
+
+#### 语义/不变量（必须测死，后续不得漂移）
+- `LoadProcess` 成功后，返回的 handle 在进程表中可查，`GetProcess(handle)` 返回的 user_id 和 base_va 与 SecureIR JSON 中的值一致。
+- `LoadProcess` 成功后，code_memory 存储在 SecurityHardware 中，可通过 handle 查询到，内容与输入一致。
+- `ContextSwitch` 仅接受进程表中存在的 handle，否则报错。
+- 每次 `ContextSwitch` 产生恰好一条 `CTX_SWITCH` 审计事件，包含目标 handle 和对应 user_id。
+- `ReleaseProcess` 后该 handle 从进程表消失，对应 code region 从 SecurityHardware 移除；若为 active，active 重置为"无"。
+- Gateway 错误（JSON 解析失败、签名无效等）透传给调用方，进程表和 SecurityHardware 不产生脏状态。
+- 信任边界：内核层（ProcessContext）不持有 code_memory；code_memory 只存在于硬件层（SecurityHardware）。
+
+#### 测试计划（测试名 + 核心断言点）
+- `LoadProcess_Success_ProcessQueryable`：合法输入 → handle 有效 → GetProcess 返回正确 user_id、base_va。
+- `LoadProcess_Success_CodeMemoryInHardware`：load 后 SecurityHardware 可通过 handle 查到 code_memory，内容与输入一致。
+- `LoadProcess_MultiUser_HandleIsolation`：Alice 和 Bob 各自 load → handle 不同 → 各自 GetProcess 返回各自 user_id。
+- `ContextSwitch_UpdatesActive_EmitsAudit`：切换 → GetActiveProcess 返回目标进程 → 审计链含 CTX_SWITCH。
+- `ContextSwitch_InvalidHandle_Throws`：无效 handle → 异常 → active 不变。
+- `ContextSwitch_Idempotent`：同一 handle 连续切换两次 → 成功 → 两条 CTX_SWITCH 审计。
+- `ReleaseProcess_RemovesFromTable`：release → GetProcess 返回 nullptr。
+- `ReleaseProcess_ActiveHandle_ResetsActive`：release active handle → GetActiveProcess 返回 nullptr。
+- `ReleaseProcess_CodeMemoryRemovedFromHardware`：release 后 SecurityHardware 查不到该 handle 的 code region。
+- `ReleaseProcess_ThenContextSwitch_Throws`：release 后切换 → 异常。
+- `LoadProcess_GatewayError_NoDirtyState`：无效 JSON → 异常 → 进程表和 SecurityHardware 无残留。
+
+#### 验收命令（仅列出，将由用户批准后执行）
+- `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+- `cmake --build build`
+- `ctest --test-dir build`
+
+#### 设计决策记录
+
+**D-1：namespace sim::kernel**
+- 决策：使用 `sim::kernel`，与现有 `src/kernel/scaffold.cpp` 一致。
+- 原因：内核层是软件模拟，与 `sim::security`（硬件模拟）语义分离。
+
+**D-2：ContextSwitch 幂等**
+- 决策：切换到已 active 的同一 handle 静默成功，仍发 `CTX_SWITCH` 审计。
+- 原因：硬件不区分"重复切换"，简化调用方逻辑。
+
+**D-3：ProcessContext 不含 program_name**
+- 决策：去掉 `program_name`，只保留功能必需字段。
+- 原因：真实硬件无 program_name 概念，硬件只认 handle/user_id/密钥/地址。
+
+**D-4：code_memory 归硬件层，不归内核**
+- 决策：code_memory 存储在 SecurityHardware 中，ProcessContext 不持有。
+- 原因：内核不可信，不应持有受保护的数据。code_memory 是密文，模拟硬件保护的物理内存。
+
+**D-5：base_va 归内核持有**
+- 决策：base_va 放在 ProcessContext 中。
+- 原因：内核需要管理虚拟地址空间映射（页表），base_va 是 DP-9/DP-10 允许内核知道的布局信息。
+
+**D-6：Gateway 不新增持久存储**
+- 决策：不向 Gateway 添加 GetBaseVaForHandle 等新 getter。
+- 原因：Gateway 是"检查+配置"硬件，处理完 SecureIR 后不应持续存储程序元数据。
+
+**D-7：内核从 JSON 明文头提取 metadata**
+- 决策：KernelProcessTable::LoadProcess 内部做轻量 JSON 提取获得 user_id 和 base_va。
+- 原因：DP-9 规定 SecureIR 布局元数据为明文，内核可读；避免依赖 Gateway 暴露额外 getter。
+
+**D-8：两参数 LoadProcess 是已知简化**
+- 决策：LoadProcess(json, code_memory) 接收两个分离的参数。
+- 原因：完整 SecureIR 包（metadata + 加密代码捆绑）属于 I-1 范畴，6B 不做。
+
+**D-9：不修改 Executor 和 demo**
+- 决策：6B 只新增内核层 + 扩展 SecurityHardware，不改动 Executor 和 demo_normal。
+- 原因：Executor 集成和 demo 改造属于 6C 范围。
+
+#### Codex 可行性检查结果摘要
+- `Gateway::GetUserIdForHandle()` 可在 Load 后查 user_id（但 D-7 决定内核自行从 JSON 提取，不依赖此 getter）。
+- `sim::kernel` namespace 和 `include/kernel/` 路径无命名冲突。
+- `src/kernel/scaffold.cpp` 已在 `simulator_core` 静态库中编译，新增 `src/kernel/process.cpp` 同样接入即可。
+- `EwcTable::SetWindows()` 已在 `Gateway::Load()` 内调用，KernelProcessTable 不需要直接操作 EWC。
+- `include/` 已设为 public include dir，新增 `include/kernel/process.hpp` 直接可用。
+- `AuditCollector::LogEvent()` 是 public，`sim::kernel` 可跨 namespace 调用。
+
+### 实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送（branch: issue-6b-kernel-process-model）
+
+#### 改动摘要（diff 风格）
+- `CMakeLists.txt | 12 ++++++++++++`
+- `include/security/hardware.hpp | 42 ++++++++++++++++++++++++++++++++++++++++++`
+- `include/kernel/process.hpp (new) | 41 +++++++++++++++++++++++++++++++++`
+- `src/kernel/process.cpp (new) | 366 ++++++++++++++++++++++++++++++++++++`
+- `tests/test_kernel_process.cpp (new) | 269 +++++++++++++++++++++++++++++`
+- `5 files changed, 730 insertions(+)`
+
+#### 关键文件逐条复盘
+- `include/security/hardware.hpp`：新增 `CodeRegion` 和 per-handle code region 存储接口 `StoreCodeRegion` / `GetCodeRegion` / `RemoveCodeRegion`，把 code_memory 所有权下沉到 `SecurityHardware`，强化内核与受保护代码的 trust boundary。
+- `include/kernel/process.hpp`：新增 `ProcessContext` 与 `KernelProcessTable` 声明；`ProcessContext` 只保留 `{handle, user_id, base_va}`，不持有 `program_name` 或 code_memory。
+- `src/kernel/process.cpp`：实现 `KernelProcessTable` 全部语义；内置最小 JSON parser（沿用 `gateway.cpp` 的轻量模式）从 SecureIR 明文头提取 `user_id/base_va`，并在 `LoadProcess` 失败路径中回滚 `SecurityHardware` 与 `Gateway`，避免脏状态残留。
+- `tests/test_kernel_process.cpp`：新增 11 个单元测试，覆盖 load/query、multi-user isolation、`ContextSwitch` 审计、`ReleaseProcess` 清理，以及 `LoadProcess_GatewayError_NoDirtyState` rollback 行为。
+- `CMakeLists.txt`：把 `src/kernel/process.cpp` 接入 `simulator_core`，新增 `test_kernel_process` target 并注册到 `ctest`；`demo_normal` 保持不变。
+
+#### 行为变化总结
+- 新增能力：
+  - 在 `Gateway` 之上新增 `KernelProcessTable`，现在可以 load/release/query process，并维护 active process 与 `CTX_SWITCH` 审计流。
+  - `SecurityHardware` 现在可按 `context_handle` 持有 `CodeRegion{base_va, code_memory}`，为后续 6C 的 executor/context switch 集成提供硬件侧代码存储。
+  - `LoadProcess` 会先解析 SecureIR 明文头，再调用 `Gateway` 建立 handle，并把 code_memory 移交给硬件层；内核侧只保留最小调度元数据。
+- 失败模式/Trap：
+  - `ContextSwitch` 对不存在的 handle 抛 `std::runtime_error("kernel_process_invalid_handle ...")`，active process 不会被污染。
+  - `LoadProcess` 遇到 JSON parse/field 校验失败时抛 `kernel_process_json_parse_error`、`kernel_process_missing_field` 或 `kernel_process_invalid_field`；若 `Gateway::Load()` 或后续插入过程失败，会回滚 `SecurityHardware` code region、`Gateway` handle 与进程表状态。
+  - `demo_normal` 与 executor 行为本次未改动；6B 只增加 kernel process model，不改变现有 demo 路径。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - `git diff --stat -- CMakeLists.txt include/security/hardware.hpp`
+  - `git diff --no-index --stat -- /dev/null include/kernel/process.hpp`
+  - `git diff --no-index --stat -- /dev/null src/kernel/process.cpp`
+  - `git diff --no-index --stat -- /dev/null tests/test_kernel_process.cpp`
+  - `ctest --test-dir build --output-on-failure`
+  - `./build/test_kernel_process`
+- 已通过测试：
+  - `ctest`：5/5 通过
+  - `sanity`
+  - `isa_assembler`
+  - `executor`
+  - `gateway`
+  - `kernel_process`
+  - `kernel_process` 内新增 11 个 test cases 全部通过：
+    `LoadProcess_Success_ProcessQueryable`、`LoadProcess_Success_CodeMemoryInHardware`、`LoadProcess_MultiUser_HandleIsolation`、`ContextSwitch_UpdatesActive_EmitsAudit`、`ContextSwitch_InvalidHandle_Throws`、`ContextSwitch_Idempotent`、`ReleaseProcess_RemovesFromTable`、`ReleaseProcess_ActiveHandle_ResetsActive`、`ReleaseProcess_CodeMemoryRemovedFromHardware`、`ReleaseProcess_ThenContextSwitch_Throws`、`LoadProcess_GatewayError_NoDirtyState`
+
+#### 已知限制 & 下一步建议
+- `Gateway` 目前仍持有 `handle_to_user_` 映射；这是既有简化，不是 6B 新引入的问题，但意味着 user metadata 仍有一份存放在 gateway 层。
+- 当前 `KernelProcessTable` 只负责进程表、硬件 code region 存储与 `CTX_SWITCH` 审计；尚未把 active handle 进一步接到 executor fetch/runtime 路径，这部分留给 6C。
