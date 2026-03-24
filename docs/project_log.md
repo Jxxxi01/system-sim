@@ -934,19 +934,24 @@
 - `program.base_va` 在 FetchStage 外仍有 `pc_relative_overflow` 诊断和 wrapper 中的 EWC window 生成依赖。
 
 ### 实现复盘
-**状态：** 已实现（未推送）
-**提交：** TBD
-**远端：** 未推送
+**状态：** 已实现（已推送）
+**提交：** 0aba535
+**远端：** origin/issue-6a-unified-code-memory（2026-03-24 推送）
 
 #### 改动摘要（diff 风格）
+- `.gitignore | 2 +`
+- `CLAUDE.md | 70 +++++++++++--------`
 - `demos/normal/demo_normal.cpp | 15 +++--`
+- `docs/project_log.md | 148 ++++++++++++++++++++++++++++++++++++++++`
 - `include/core/executor.hpp | 12 ++--`
 - `include/security/code_codec.hpp | 5 ++`
 - `src/core/executor.cpp | 128 +++++++++++++--------------------------`
 - `src/security/code_codec.cpp | 57 ++++++++++++++++++`
 - `tests/test_executor.cpp | 130 ++++++++++++++++++++++++----------------`
 - `tests/test_gateway.cpp | 8 ++-`
-- `7 files changed, 204 insertions(+), 151 deletions(-)`
+- `docs/Demo_Claim_Boundary_v3.1.md (new)`
+- `docs/system_design_v4.md (new)`
+- `12 files changed, 2958 insertions(+), 181 deletions(-)`
 
 #### 关键文件逐条复盘
 - `include/security/code_codec.hpp`：新增 `kCipherUnitBytes`、`SerializeCipherUnit`、`DeserializeCipherUnit`、`BuildCodeMemory` 声明，统一 code image 的字节级表示。
