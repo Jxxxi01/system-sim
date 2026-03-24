@@ -1104,9 +1104,9 @@
 - `AuditCollector::LogEvent()` 是 public，`sim::kernel` 可跨 namespace 调用。
 
 ### 实现复盘
-**状态：** 已实现（未推送）
-**提交：** TBD
-**远端：** 未推送（branch: issue-6b-kernel-process-model）
+**状态：** 已实现（已推送）
+**提交：** 88e64e5
+**远端：** origin/issue-6b-kernel-process-model（2026-03-24 推送）
 
 #### 改动摘要（diff 风格）
 - `CMakeLists.txt | 12 ++++++++++++`
