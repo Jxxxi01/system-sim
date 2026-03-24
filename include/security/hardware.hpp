@@ -1,9 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <stdexcept>
 
 #include "security/audit.hpp"
 #include "security/ewc.hpp"
@@ -27,11 +30,15 @@ class SecurityHardware {
   CodeRegion* GetCodeRegion(ContextHandle handle);
   const CodeRegion* GetCodeRegion(ContextHandle handle) const;
   void RemoveCodeRegion(ContextHandle handle);
+  void SetActiveHandle(ContextHandle handle);
+  std::optional<ContextHandle> GetActiveHandle() const;
+  void ClearActiveHandle();
 
  private:
   EwcTable ewc_table_;
   AuditCollector audit_collector_;
   std::unordered_map<ContextHandle, CodeRegion> code_regions_;
+  std::optional<ContextHandle> active_handle_;
 };
 
 inline EwcTable& SecurityHardware::GetEwcTable() { return ewc_table_; }
@@ -67,5 +74,16 @@ inline const CodeRegion* SecurityHardware::GetCodeRegion(ContextHandle handle) c
 }
 
 inline void SecurityHardware::RemoveCodeRegion(ContextHandle handle) { code_regions_.erase(handle); }
+
+inline void SecurityHardware::SetActiveHandle(ContextHandle handle) {
+  if (GetCodeRegion(handle) == nullptr) {
+    throw std::runtime_error("security_hardware_invalid_active_handle");
+  }
+  active_handle_ = handle;
+}
+
+inline std::optional<ContextHandle> SecurityHardware::GetActiveHandle() const { return active_handle_; }
+
+inline void SecurityHardware::ClearActiveHandle() { active_handle_.reset(); }
 
 }  // namespace sim::security

@@ -142,6 +142,31 @@ SIM_TEST(ContextSwitch_UpdatesActive_EmitsAudit) {
   SIM_EXPECT_TRUE(Contains(events[0].detail, "base_va=20480"));
 }
 
+SIM_TEST(SetActiveHandle_Valid_Succeeds) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
+  const std::uint64_t base_va = 0x5200;
+  const sim::security::ContextHandle handle = processes.LoadProcess(
+      MakeSecureIrJson("proc", 33, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 5)), {1, 2, 3, 4});
+
+  hardware.SetActiveHandle(handle);
+
+  SIM_EXPECT_TRUE(hardware.GetActiveHandle().has_value());
+  SIM_EXPECT_EQ(*hardware.GetActiveHandle(), handle);
+}
+
+SIM_TEST(SetActiveHandle_InvalidHandle_Throws) {
+  sim::security::SecurityHardware hardware;
+
+  try {
+    hardware.SetActiveHandle(99);
+    SIM_EXPECT_TRUE(false);
+  } catch (const std::runtime_error&) {
+    SIM_EXPECT_TRUE(true);
+  }
+}
+
 SIM_TEST(ContextSwitch_InvalidHandle_Throws) {
   sim::security::SecurityHardware hardware;
   sim::security::Gateway gateway(hardware);
@@ -205,6 +230,20 @@ SIM_TEST(ReleaseProcess_ActiveHandle_ResetsActive) {
   processes.ReleaseProcess(handle);
 
   SIM_EXPECT_TRUE(processes.GetActiveProcess() == nullptr);
+}
+
+SIM_TEST(ReleaseProcess_ActiveHandle_ClearsHardwareActive) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
+  const std::uint64_t base_va = 0x5e00;
+  const sim::security::ContextHandle handle = processes.LoadProcess(
+      MakeSecureIrJson("proc", 43, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 3)), {8, 6, 4, 2});
+
+  processes.ContextSwitch(handle);
+  processes.ReleaseProcess(handle);
+
+  SIM_EXPECT_TRUE(!hardware.GetActiveHandle().has_value());
 }
 
 SIM_TEST(ReleaseProcess_CodeMemoryRemovedFromHardware) {

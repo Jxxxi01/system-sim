@@ -1154,3 +1154,161 @@
 #### 已知限制 & 下一步建议
 - `Gateway` 目前仍持有 `handle_to_user_` 映射；这是既有简化，不是 6B 新引入的问题，但意味着 user metadata 仍有一份存放在 gateway 层。
 - 当前 `KernelProcessTable` 只负责进程表、硬件 code region 存储与 `CTX_SWITCH` 审计；尚未把 active handle 进一步接到 executor fetch/runtime 路径，这部分留给 6C。
+
+## Issue 6C：cross-user 隔离 demo（方案确认）
+**日期：** 2026-03-24
+**分支：** issue-6c-cross-user-demo
+**状态：** 方案已确认
+
+### 初始需求（用户提出）
+- 利用 6B 的 KernelProcessTable 构建 cross-user 隔离演示（demo_cross_user），包含 Executor 集成。
+- 展示两种攻击路径被硬件拦截：用户态代码跳转 + 恶意 OS 设置 entry_pc。
+
+### 额外补充/优化需求（对话新增）
+- Executor 集成采用方案 C：Executor 接收 `SecurityHardware*`，fetch stage 内部从硬件闭环获取安全状态，OS 无法伪造。
+- `SecurityHardware` 新增 active context register（`SetActiveHandle`/`GetActiveHandle`/`ClearActiveHandle`），`SetActiveHandle` 必须做硬件侧校验（handle 必须有对应 CodeRegion）。
+- `KernelProcessTable::ContextSwitch` 同步写硬件 active context register，模拟"OS 执行特权指令写硬件寄存器"。
+- `ReleaseProcess` 若释放的是 active handle，同步调用 `ClearActiveHandle`。
+- Demo 包含三个 case：Alice 正常执行、Bob JMP 攻击、恶意 OS entry_pc 攻击。
+- 恶意 OS 场景的安全分析：OS 写 active context register 等价于调度权（所有架构中 OS 都拥有），安全性由硬件校验 handle 有效性 + 硬件强制执行隔离边界保证。
+
+### Coding 前最终方案
+#### 文件与模块清单
+- 修改：
+  - `include/security/hardware.hpp`（新增 active context register 接口）
+  - `src/kernel/process.cpp`（ContextSwitch 写硬件 + ReleaseProcess 清硬件）
+  - `include/core/executor.hpp`（ExecuteOptions 新增 `hardware` 字段）
+  - `src/core/executor.cpp`（fetch stage 新增硬件查询路径）
+  - `CMakeLists.txt`（新增 demo_cross_user target）
+- 新增：
+  - `demos/cross_user/demo_cross_user.cpp`（cross-user demo）
+
+#### 语义接口（WHAT，签名由 Codex 决定）
+- **SecurityHardware 扩展**：
+  - `SetActiveHandle(handle)`：校验 `GetCodeRegion(handle) != nullptr`，通过则设置 active，否则抛异常。模拟片上 active context register 的写入。
+  - `GetActiveHandle()`：返回当前 active handle（无 active 时返回空）。
+  - `ClearActiveHandle()`：清除 active（供 ReleaseProcess 调用）。
+- **KernelProcessTable 调整**：
+  - `ContextSwitch`：现有逻辑不变，新增调用 `hardware_.SetActiveHandle(handle)`。
+  - `ReleaseProcess`：若释放的是 active handle，新增调用 `hardware_.ClearActiveHandle()`。
+- **Executor 集成**：
+  - `ExecuteOptions` 新增 `SecurityHardware* hardware = nullptr`。
+  - 当 `hardware` 非空时，`ExecuteProgram` 内部从硬件获取：active handle（`GetActiveHandle`）→ code region（`GetCodeRegion`）→ EWC（`GetEwcTable`）→ audit（`GetAuditCollector`）。忽略手动传入的 ewc/audit/code_memory/context_handle 字段。
+  - 当 `hardware` 为空时，完全走现有手动字段路径（向后兼容）。
+- **demo_cross_user**：
+  - Setup：创建硬件栈 + KernelProcessTable，Load Alice @ 0x1000、Load Bob @ 0x2000。
+  - Case A：ContextSwitch(Alice) → ExecuteProgram(0x1000) → 预期 HALT。
+  - Case B：ContextSwitch(Bob) → ExecuteProgram(0x2000) → Bob 程序含 JMP 0x1000 → 预期 EWC_ILLEGAL_PC。
+  - Case C：ContextSwitch(Bob) → ExecuteProgram(0x1000) → 预期 EWC_ILLEGAL_PC（首条 fetch 即被拦截）。
+  - 每个 case 输出 run summary + audit events + context trace。
+
+#### 语义/不变量（必须测死，后续不得漂移）
+- `SetActiveHandle` 拒绝无 CodeRegion 的 handle，抛异常；有效 handle 成功设置。
+- `ReleaseProcess` 若释放 active handle，硬件侧 active 同步被清除，`GetActiveHandle` 返回空。
+- `hardware` 非空时，Executor 只从 SecurityHardware 获取安全状态，不使用手动字段。
+- `hardware` 为空时，Executor 行为与现有完全一致（向后兼容）。
+- Executor 硬件路径下无 active handle → 合理错误（trap 或异常）。
+- Case B/C 中 Bob 的 handle 对应的 EWC windows 不覆盖 0x1000 → EWC_ILLEGAL_PC。
+- 每次 ContextSwitch 产生 CTX_SWITCH 审计，EWC 拦截产生 EWC_ILLEGAL_PC 审计。
+
+#### 测试计划（测试名 + 核心断言点）
+- `SetActiveHandle_Valid_Succeeds`：有效 handle → GetActiveHandle 返回该 handle。
+- `SetActiveHandle_InvalidHandle_Throws`：无 CodeRegion 的 handle → 异常。
+- `ReleaseProcess_ActiveHandle_ClearsHardwareActive`：release active handle → GetActiveHandle 返回空。
+- `Executor_HardwarePath_NormalExecution`：hardware 非空 + 有效 active handle → 正常执行，功能等价手动路径。
+- `Executor_HardwarePath_NoActiveHandle_Error`：hardware 非空 + 无 active handle → 合理错误。
+- `Demo_CaseA_AliceNormal`：Alice 正常执行 → HALT。
+- `Demo_CaseB_BobJmpAttack`：Bob JMP 到 Alice 地址 → EWC_ILLEGAL_PC。
+- `Demo_CaseC_MaliciousOS`：entry_pc 设为 Alice 地址但 active 是 Bob → EWC_ILLEGAL_PC。
+
+#### 验收命令（仅列出，将由用户批准后执行）
+- `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+- `cmake --build build`
+- `ctest --test-dir build`
+- `./build/demo_cross_user`
+
+#### 设计决策记录
+
+**D-1：方案 C — Executor 从硬件闭环获取安全状态**
+- 决策：`ExecuteOptions` 新增 `SecurityHardware*`，非空时 Executor 内部从硬件读取全部安全参数。
+- 原因：模拟真实硬件中 CPU pipeline 直接访问片上安全硬件的语义；防止 OS 伪造 code_memory 等安全参数。
+
+**D-2：SecurityHardware 新增 active context register**
+- 决策：active handle 存储在硬件层而非仅在内核。
+- 原因：active handle 在真实硬件中是片上寄存器，OS 可以写（调度权），CPU 直接读。存在内核侧不符合 OS-untrusted 信任模型。
+
+**D-3：SetActiveHandle 硬件侧校验**
+- 决策：SetActiveHandle 必须校验 handle 有效性（有对应 CodeRegion）。
+- 原因：防止恶意 OS 设置已 release 或从未 load 的 handle，避免 use-after-free 或未初始化访问。
+
+**D-4：OS 写 active context register 的安全性**
+- 决策：允许 OS 自由写（只要 handle 有效），不做额外权限控制。
+- 原因：OS 拥有调度权是所有架构的共识（SGX/TrustZone 同理）。安全性由硬件强制执行隔离边界保证，而非限制 OS 的调度能力。
+
+**D-5：向后兼容**
+- 决策：`hardware == nullptr` 时完全走旧路径，demo_normal 和已有测试不改动。
+- 原因：6C 只新增硬件路径，不破坏已有功能。
+
+**D-6：demo 三个 case 展示两种攻击维度**
+- 决策：Case A（正常执行）+ Case B（用户态 JMP 攻击）+ Case C（恶意 OS entry_pc 攻击）。
+- 原因：同时展示 OS-untrusted 信任模型的两个维度——用户态代码不可越界 + OS 不可伪造执行入口。
+
+#### Codex 可行性检查结果摘要
+- `ExecuteOptions` 新增 `SecurityHardware*` 无命名冲突，include `security/hardware.hpp` 不会循环依赖。
+- `FetchStage` 签名需调整以接收硬件路径参数，或在 `ExecuteProgram` 入口处解析后传入局部变量。
+- `GetCodeRegion` 返回 `CodeRegion*`，`GetEwcTable()`/`GetAuditCollector()` 返回引用（需取地址转指针）。
+- EWC windows 已按 context_handle 隔离（`unordered_map<ContextHandle, vector<ExecWindow>>`）。
+- `ContextSwitch` 只更新内核 `active_handle_`，不驱动 EWC 查询——通过新增硬件 active register 解决。
+- 现有测试全部使用"默认构造+逐字段赋值"，新增尾部字段不破坏兼容性。
+
+### 实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 改动摘要（diff 风格）
+- `include/security/hardware.hpp | active context register + 校验逻辑`
+- `include/core/executor.hpp | ExecuteOptions 新增 hardware 字段`
+- `src/core/executor.cpp | Executor 硬件路径 + fetch 优先 EWC 检查`
+- `src/kernel/process.cpp | ContextSwitch/ReleaseProcess 同步硬件 active handle`
+- `demos/cross_user/demo_cross_user.cpp (new) | 3 个 cross-user case`
+- `CMakeLists.txt | 新增 demo_cross_user target`
+- `tests/test_kernel_process.cpp | 新增 3 个硬件 active handle 相关测试`
+- `tests/test_executor.cpp | 新增 2 个 Executor 硬件路径测试`
+
+#### 关键文件逐条复盘
+- `include/security/hardware.hpp`：新增 active context register 接口 `SetActiveHandle` / `GetActiveHandle` / `ClearActiveHandle`，并在硬件侧校验 handle 必须存在对应 `CodeRegion`，避免 OS 写入无效或已释放 handle。
+- `include/core/executor.hpp`：为 `ExecuteOptions` 增加 `SecurityHardware* hardware`，为 Executor 提供从硬件闭环读取安全状态的入口，同时保留 `hardware == nullptr` 的旧路径兼容性。
+- `src/core/executor.cpp`：实现 Executor 硬件路径；当 `hardware` 非空时，从 `SecurityHardware` 解析 active handle、code region、EWC 和 audit，并在 fetch 阶段先做 EWC 检查、后做 bounds 检查，确保跨上下文访问优先得到 `EWC_ILLEGAL_PC`。
+- `src/kernel/process.cpp`：`ContextSwitch` 先调用 `hardware_.SetActiveHandle()` 再更新内核状态与审计，修复切换提交顺序；`ReleaseProcess` 在释放 active handle 时同步 `ClearActiveHandle()`，避免硬件残留脏状态。
+- `demos/cross_user/demo_cross_user.cpp`：新增 cross-user demo，覆盖 Alice 正常执行、Bob 通过 `JMP` 越权访问、恶意 OS 伪造 `entry_pc` 三个场景，并输出 trap、audit stream 和 context_handle 切换轨迹。
+- `CMakeLists.txt`：注册 `demo_cross_user` target，纳入现有构建流程。
+- `tests/test_kernel_process.cpp`：新增 `SetActiveHandle_Valid_Succeeds`、`SetActiveHandle_InvalidHandle_Throws`、`ReleaseProcess_ActiveHandle_ClearsHardwareActive`，补足 active register 的行为约束测试。
+- `tests/test_executor.cpp`：新增 `Executor_HardwarePath_NormalExecution` 与 `Executor_HardwarePath_NoActiveHandle_Error`，覆盖硬件路径正常执行与缺失 active handle 的失败场景。
+
+#### 行为变化总结
+- 新增能力：
+  - `SecurityHardware` 现在显式维护 active context register，CPU/Executor 可直接从硬件读取当前活动上下文。
+  - Executor 在 `hardware` 路径下可完全脱离手动注入的安全状态参数，由硬件统一提供 active handle、代码区、EWC 与审计对象。
+  - 新增 `demo_cross_user`，可直接演示正常执行、用户态跨用户跳转攻击、恶意 OS 入口伪造三种场景。
+- 失败模式/Trap：
+  - 对无 `CodeRegion` 的 handle 调用 `SetActiveHandle` 会抛异常，阻止无效 active register 写入。
+  - `hardware` 路径下若无 active handle，Executor 会报错，避免在未绑定上下文时继续执行。
+  - Bob 上下文访问 `0x1000` 时，无论通过 `JMP` 还是恶意 `entry_pc` 注入，fetch 首先触发 EWC 拦截并记录 `EWC_ILLEGAL_PC`。
+  - `demo_normal` 保持原有路径，`hardware == nullptr` 时行为与改动前一致。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - `ctest --test-dir build`
+  - `./build/demo_cross_user`
+- 已通过测试：
+  - `ctest`：5/5 通过
+  - `demo_cross_user`：Case A = `HALT`，Case B = `EWC_ILLEGAL_PC`，Case C = `EWC_ILLEGAL_PC`
+  - `demo_normal`：保持可运行，向后兼容未回归
+  - `test_kernel_process`：共 14 个 test cases 通过（原有 11 个 + 本次新增 3 个）
+  - `test_executor`：新增 2 个硬件路径测试通过
+  - 评审回合修复情况：Round 1 发现的 `ContextSwitch` 提交顺序问题与缺失测试已在 Round 2 修复，最终全绿
+
+#### 已知限制 & 下一步建议
+- 当前日志仅记录实现结果，未补充提交 hash；若后续提交分支，可在同一 Issue 下补写提交与远端状态。
+- `demo_cross_user` 已覆盖两类攻击维度，但仍属于最小原型验证，后续若继续扩展，可增加更多上下文切换与多进程交错执行场景。

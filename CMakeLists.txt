@@ -115,3 +115,12 @@ target_link_libraries(demo_normal
   PRIVATE
     simulator_core
 )
+
+add_executable(demo_cross_user
+  demos/cross_user/demo_cross_user.cpp
+)
+
+target_link_libraries(demo_cross_user
+  PRIVATE
+    simulator_core
+)

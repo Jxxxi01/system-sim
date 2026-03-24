@@ -327,11 +327,13 @@ sim::security::ContextHandle KernelProcessTable::LoadProcess(const std::string& 
 }
 
 void KernelProcessTable::ReleaseProcess(sim::security::ContextHandle handle) {
+  const bool was_active = active_handle_.has_value() && *active_handle_ == handle;
   gateway_.Release(handle);
   hardware_.RemoveCodeRegion(handle);
   processes_.erase(handle);
-  if (active_handle_.has_value() && *active_handle_ == handle) {
+  if (was_active) {
     active_handle_.reset();
+    hardware_.ClearActiveHandle();
   }
 }
 
@@ -343,6 +345,7 @@ void KernelProcessTable::ContextSwitch(sim::security::ContextHandle handle) {
     throw std::runtime_error(oss.str());
   }
 
+  hardware_.SetActiveHandle(handle);
   active_handle_ = handle;
   audit_.LogEvent("CTX_SWITCH", process->user_id, process->context_handle, process->base_va,
                   MakeContextSwitchDetail(*process));

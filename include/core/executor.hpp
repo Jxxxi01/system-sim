@@ -9,6 +9,7 @@
 
 #include "security/audit.hpp"
 #include "security/ewc.hpp"
+#include "security/hardware.hpp"
 
 namespace sim::core {
 
@@ -48,6 +49,7 @@ struct ExecuteOptions {
   sim::security::ContextHandle context_handle = 0;
   const sim::security::EwcTable* ewc = nullptr;
   sim::security::AuditCollector* audit = nullptr;
+  sim::security::SecurityHardware* hardware = nullptr;
   std::uint64_t region_base_va = 0;
   const std::uint8_t* code_memory = nullptr;
   std::size_t code_memory_size = 0;

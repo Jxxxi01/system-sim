@@ -3,6 +3,7 @@
 #include "security/audit.hpp"
 #include "security/code_codec.hpp"
 #include "security/ewc.hpp"
+#include "security/hardware.hpp"
 #include "test_harness.hpp"
 
 #include <cstdint>
@@ -88,6 +89,31 @@ sim::core::ExecResult RunWithEwc(const std::string& text, std::uint64_t base_va,
   options.region_base_va = base_va;
   options.code_memory = code_memory->data();
   options.code_memory_size = code_memory->size();
+  return sim::core::ExecuteProgram(base_va, options);
+}
+
+sim::core::ExecResult RunWithHardware(const std::string& text, std::uint64_t base_va,
+                                      sim::security::ContextHandle context_handle,
+                                      std::uint32_t user_id = 1, std::uint32_t key_id = 0) {
+  const sim::isa::AsmProgram program = sim::isa::AssembleText(text, base_va);
+  const std::vector<std::uint8_t> code_memory =
+      sim::security::BuildCodeMemory(sim::security::EncryptProgram(program, key_id));
+
+  sim::security::SecurityHardware hardware;
+  sim::security::ExecWindow window;
+  window.window_id = 1;
+  window.start_va = base_va;
+  window.end_va = base_va + program.code.size() * sim::isa::kInstrBytes;
+  window.owner_user_id = user_id;
+  window.key_id = key_id;
+  window.type = sim::security::ExecWindowType::CODE;
+  window.code_policy_id = 1;
+  hardware.GetEwcTable().SetWindows(context_handle, std::vector<sim::security::ExecWindow>{window});
+  hardware.StoreCodeRegion(context_handle, base_va, code_memory);
+  hardware.SetActiveHandle(context_handle);
+
+  sim::core::ExecuteOptions options;
+  options.hardware = &hardware;
   return sim::core::ExecuteProgram(base_va, options);
 }
 
@@ -253,6 +279,33 @@ SIM_TEST(Execute_EwcAllows_ProgramRunsToHalt) {
   const auto result = RunWithEwc(src, base, ewc, 7, nullptr, &audit);
   SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
   SIM_EXPECT_EQ(audit.GetEvents().size(), static_cast<std::size_t>(0));
+}
+
+SIM_TEST(Executor_HardwarePath_NormalExecution) {
+  const std::string src = R"(
+  LI x1, 7
+  LI x2, 9
+  ADD x3, x1, x2
+  HALT
+)";
+
+  const auto result = RunWithHardware(src, 0x9800, 17, 8, 41);
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
+  SIM_EXPECT_EQ(result.state.regs[3], 16u);
+  SIM_EXPECT_EQ(result.context_trace.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_TRUE(Contains(result.context_trace[0], "context_handle=17"));
+}
+
+SIM_TEST(Executor_HardwarePath_NoActiveHandle_Error) {
+  sim::security::SecurityHardware hardware;
+
+  sim::core::ExecuteOptions options;
+  options.hardware = &hardware;
+  const auto result = sim::core::ExecuteProgram(0x9900, options);
+
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::INVALID_PC);
+  SIM_EXPECT_EQ(result.trap.pc, 0x9900u);
+  SIM_EXPECT_TRUE(Contains(result.trap.msg, "reason=no_active_context"));
 }
 
 SIM_TEST(Execute_EwcDenies_AtEntry_TrapsEwcIllegalPc) {

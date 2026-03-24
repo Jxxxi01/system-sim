@@ -124,7 +124,17 @@ bool AddPcRelative(std::uint64_t next_pc, std::int64_t imm, std::uint64_t* out_p
 bool FetchStage(std::uint64_t pc, const sim::security::EwcTable& ewc,
                 sim::security::ContextHandle context_handle, const std::uint8_t* code_memory,
                 std::size_t code_memory_size, std::uint64_t region_base_va, FetchPacket* packet,
-                Trap* trap, std::string* deny_detail) {
+                Trap* trap, std::string* deny_detail, bool prefer_ewc_gate) {
+  std::optional<sim::security::EwcQueryResult> query_result;
+  if (prefer_ewc_gate) {
+    query_result = ewc.Query(pc, context_handle);
+    if (!query_result->allow) {
+      *trap = Trap{TrapReason::EWC_ILLEGAL_PC, pc, MakeEwcDenyMsg(pc, context_handle, *query_result)};
+      *deny_detail = MakeEwcDenyDetail(*query_result);
+      return false;
+    }
+  }
+
   if (pc < region_base_va) {
     *trap = Trap{TrapReason::INVALID_PC, pc,
                  MakeInvalidPcMsg(pc, region_base_va, code_memory_size, "underflow")};
@@ -156,17 +166,19 @@ bool FetchStage(std::uint64_t pc, const sim::security::EwcTable& ewc,
     return false;
   }
 
-  const sim::security::EwcQueryResult query_result = ewc.Query(pc, context_handle);
-  if (!query_result.allow) {
-    *trap = Trap{TrapReason::EWC_ILLEGAL_PC, pc, MakeEwcDenyMsg(pc, context_handle, query_result)};
-    *deny_detail = MakeEwcDenyDetail(query_result);
+  if (!query_result.has_value()) {
+    query_result = ewc.Query(pc, context_handle);
+  }
+  if (!query_result->allow) {
+    *trap = Trap{TrapReason::EWC_ILLEGAL_PC, pc, MakeEwcDenyMsg(pc, context_handle, *query_result)};
+    *deny_detail = MakeEwcDenyDetail(*query_result);
     return false;
   }
 
   packet->pc = pc;
   packet->next_pc = pc + sim::isa::kInstrBytes;
-  packet->owner_user_id = query_result.owner_user_id;
-  packet->key_id = query_result.key_id;
+  packet->owner_user_id = query_result->owner_user_id;
+  packet->key_id = query_result->key_id;
   const std::size_t byte_offset_size_t = static_cast<std::size_t>(byte_offset);
   packet->cipher = sim::security::DeserializeCipherUnit(code_memory + byte_offset_size_t,
                                                         sim::security::kCipherUnitBytes);
@@ -230,30 +242,64 @@ void LogAudit(sim::security::AuditCollector* audit, std::string type, std::uint3
 }
 
 ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options) {
-  if (options.code_memory == nullptr) {
-    throw std::runtime_error("code_memory_not_configured");
-  }
-  if (options.code_memory_size == 0) {
-    throw std::runtime_error("code_memory_empty");
-  }
-  if ((options.code_memory_size % sim::security::kCipherUnitBytes) != 0) {
-    throw std::runtime_error("code_memory_size_not_aligned");
-  }
-
   ExecResult result;
   result.state.pc = entry_pc;
   result.state.regs.fill(0);
   result.state.mem.assign(options.mem_size, 0);
+
+  sim::security::ContextHandle context_handle = options.context_handle;
+  const sim::security::EwcTable* ewc = options.ewc;
+  sim::security::AuditCollector* audit = options.audit;
+  std::uint64_t region_base_va = options.region_base_va;
+  const std::uint8_t* code_memory = options.code_memory;
+  std::size_t code_memory_size = options.code_memory_size;
+
+  if (options.hardware != nullptr) {
+    const std::optional<sim::security::ContextHandle> active_handle = options.hardware->GetActiveHandle();
+    if (!active_handle.has_value()) {
+      std::ostringstream oss;
+      oss << "invalid_pc reason=no_active_context pc=" << entry_pc;
+      result.trap = Trap{TrapReason::INVALID_PC, entry_pc, oss.str()};
+      return result;
+    }
+
+    const sim::security::CodeRegion* region = options.hardware->GetCodeRegion(*active_handle);
+    if (region == nullptr) {
+      std::ostringstream oss;
+      oss << "invalid_pc reason=missing_active_region pc=" << entry_pc
+          << " context_handle=" << *active_handle;
+      result.trap = Trap{TrapReason::INVALID_PC, entry_pc, oss.str()};
+      return result;
+    }
+
+    context_handle = *active_handle;
+    ewc = &options.hardware->GetEwcTable();
+    audit = &options.hardware->GetAuditCollector();
+    region_base_va = region->base_va;
+    code_memory = region->code_memory.data();
+    code_memory_size = region->code_memory.size();
+  }
+
+  if (code_memory == nullptr) {
+    throw std::runtime_error("code_memory_not_configured");
+  }
+  if (code_memory_size == 0) {
+    throw std::runtime_error("code_memory_empty");
+  }
+  if ((code_memory_size % sim::security::kCipherUnitBytes) != 0) {
+    throw std::runtime_error("code_memory_size_not_aligned");
+  }
+
   {
     std::ostringstream oss;
-    oss << "context_handle=" << options.context_handle;
+    oss << "context_handle=" << context_handle;
     result.context_trace.push_back(oss.str());
   }
 
-  if (options.ewc == nullptr) {
+  if (ewc == nullptr) {
     std::ostringstream oss;
     oss << "ewc_not_configured"
-        << " pc=" << entry_pc << " context_handle=" << options.context_handle;
+        << " pc=" << entry_pc << " context_handle=" << context_handle;
     result.trap = Trap{TrapReason::EWC_ILLEGAL_PC, entry_pc, oss.str()};
     return result;
   }
@@ -271,11 +317,10 @@ ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options)
     FetchPacket fetched;
     Trap fetch_trap;
     std::string deny_detail;
-    if (!FetchStage(result.state.pc, *options.ewc, options.context_handle, options.code_memory,
-                    options.code_memory_size, options.region_base_va, &fetched, &fetch_trap,
-                    &deny_detail)) {
+    if (!FetchStage(result.state.pc, *ewc, context_handle, code_memory, code_memory_size, region_base_va,
+                    &fetched, &fetch_trap, &deny_detail, options.hardware != nullptr)) {
       if (!deny_detail.empty()) {
-        LogAudit(options.audit, "EWC_ILLEGAL_PC", 0, options.context_handle, fetch_trap.pc, std::move(deny_detail));
+        LogAudit(audit, "EWC_ILLEGAL_PC", 0, context_handle, fetch_trap.pc, std::move(deny_detail));
       }
       result.trap = std::move(fetch_trap);
       break;
@@ -284,10 +329,10 @@ ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options)
     sim::isa::Instr instr;
     Trap decode_trap;
     std::string decrypt_detail;
-    if (!DecodeStage(fetched, options.context_handle, &instr, &decode_trap, &decrypt_detail)) {
+    if (!DecodeStage(fetched, context_handle, &instr, &decode_trap, &decrypt_detail)) {
       if (!decrypt_detail.empty()) {
-        LogAudit(options.audit, "DECRYPT_DECODE_FAIL", fetched.owner_user_id, options.context_handle,
-                 decode_trap.pc, std::move(decrypt_detail));
+        LogAudit(audit, "DECRYPT_DECODE_FAIL", fetched.owner_user_id, context_handle, decode_trap.pc,
+                 std::move(decrypt_detail));
       }
       result.trap = std::move(decode_trap);
       break;
@@ -372,7 +417,7 @@ ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options)
         if (!AddPcRelative(fetched.next_pc, instr.imm, &committed_pc)) {
           std::ostringstream oss;
           oss << "invalid_pc reason=pc_relative_overflow pc=" << fetched.pc
-              << " base_va=" << options.region_base_va << " fault_pc=" << fetched.pc;
+              << " base_va=" << region_base_va << " fault_pc=" << fetched.pc;
           exec_trap = Trap{TrapReason::INVALID_PC, fetched.pc, oss.str()};
           has_trap = true;
         }
@@ -387,7 +432,7 @@ ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options)
           if (!AddPcRelative(fetched.next_pc, instr.imm, &committed_pc)) {
             std::ostringstream oss;
             oss << "invalid_pc reason=pc_relative_overflow pc=" << fetched.pc
-                << " base_va=" << options.region_base_va << " fault_pc=" << fetched.pc;
+                << " base_va=" << region_base_va << " fault_pc=" << fetched.pc;
             exec_trap = Trap{TrapReason::INVALID_PC, fetched.pc, oss.str()};
             has_trap = true;
           }
@@ -399,7 +444,7 @@ ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options)
         if (!AddPcRelative(fetched.next_pc, instr.imm, &committed_pc)) {
           std::ostringstream oss;
           oss << "invalid_pc reason=pc_relative_overflow pc=" << fetched.pc
-              << " base_va=" << options.region_base_va << " fault_pc=" << fetched.pc;
+              << " base_va=" << region_base_va << " fault_pc=" << fetched.pc;
           exec_trap = Trap{TrapReason::INVALID_PC, fetched.pc, oss.str()};
           has_trap = true;
         }
