@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -261,6 +262,7 @@ SIM_TEST(AuditCollector_UnifiedEvents) {
   const std::uint64_t base = 0x4000;
   const sim::isa::AsmProgram program = sim::isa::AssembleText(src, base);
   const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 55);
+  const std::vector<std::uint8_t> code_memory = sim::security::BuildCodeMemory(ciphertext);
   const sim::security::ContextHandle handle =
       gateway.Load(MakeSecureIrJson("demo", 5, "sig", base, MakeCodeWindowJson(1, base, base + 8, 77)));
 
@@ -268,8 +270,10 @@ SIM_TEST(AuditCollector_UnifiedEvents) {
   options.context_handle = handle;
   options.ewc = &hardware.GetEwcTable();
   options.audit = &hardware.GetAuditCollector();
-  options.ciphertext = &ciphertext;
-  const sim::core::ExecResult result = sim::core::ExecuteProgram(program, base, options);
+  options.region_base_va = base;
+  options.code_memory = code_memory.data();
+  options.code_memory_size = code_memory.size();
+  const sim::core::ExecResult result = sim::core::ExecuteProgram(base, options);
 
   SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
   const auto& events = hardware.GetAuditCollector().GetEvents();

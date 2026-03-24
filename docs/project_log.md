@@ -835,3 +835,151 @@
 **已推送：** 2026-03-12
 **分支：** issue-5-gateway-secureir
 **提交：** issue 5: Gateway + SecureIR L0 + structured audit
+
+## Issue 6A：统一内存模型 + Executor 取指改造（方案确认）
+**日期：** 2026-03-23
+**分支：** issue-6-kernel-emu-cross-user
+**状态：** 方案已确认
+
+### 初始需求（用户提出）
+- 当前 Executor 用对象索引取指（`program.code[index]`），导致跨用户跳转在 EWC 安全检查之前就触发数组越界，无法演示真正的硬件安全拦截链。
+- 引入统一内存模型：代码以密文字节形式写入 `code_memory[]`，Executor 从字节数组取指。
+- 代码存储（`code_memory`）和数据存储（`data_memory`）物理分离，建模硬件级 W⊕X 不变量。
+
+### 额外补充/优化需求（对话新增）
+- `region_base_va` 放在 `ExecuteOptions` 中传入。
+- 提供辅助函数 `BuildCodeMemory`（`CipherProgram → vector<uint8_t>`），供 demo 和兼容 wrapper 使用。
+- FetchPacket 诊断消息中 `index` 替换为 `pc`。
+- 删除 `CiphertextSizeMismatch` 测试，校验责任交给上层调用方。
+- VA 步长 4（kInstrBytes）、物理步长 32（kCipherUnitBytes），映射封装在 FetchStage 内部。
+
+### Coding 前最终方案
+#### 文件与模块清单
+- 修改：
+  - `include/security/code_codec.hpp`（新增 `kCipherUnitBytes`、`SerializeCipherUnit`、`DeserializeCipherUnit`、`BuildCodeMemory`）
+  - `src/security/code_codec.cpp`（实现上述接口）
+  - `include/core/executor.hpp`（`ExecuteOptions` 新增 `region_base_va`/`code_memory`/`code_memory_size`，移除 `ciphertext`）
+  - `src/core/executor.cpp`（FetchStage 改造、FetchPacket 精简、诊断消息调整、兼容 wrapper 内部构建 code_memory）
+  - `tests/test_executor.cpp`（密文测试适配新接口，删除 `CiphertextSizeMismatch` 测试）
+  - `tests/test_gateway.cpp`（1 处调用点适配）
+  - `demos/normal/demo_normal.cpp`（用 `BuildCodeMemory` 构建字节数组）
+
+#### 语义接口（WHAT，签名由 Codex 决定）
+- **code_codec 序列化**：`CipherInstrUnit` ↔ 32 字节（payload 24B + key_check 4B + tag 4B），little-endian。
+- **code_codec 辅助函数**：接收 `CipherProgram`，输出 `vector<uint8_t>`，逐个序列化连续写入。
+- **FetchStage**：从 `code_memory[byte_offset]` 读 32 字节 → `DeserializeCipherUnit` → `DecryptInstr` → `Instr`。明文路径移除，始终走密文。
+- **ExecuteOptions**：新增 `region_base_va`（uint64_t）、`code_memory`（const uint8_t*）、`code_memory_size`（size_t）；移除 `ciphertext`。
+- **FetchPacket**：移除 `index`/`has_cipher`/`Instr instr`；始终填充 `CipherInstrUnit cipher`。
+- **兼容 wrapper**：旧 4 参数 `ExecuteProgram` 内部用 `key_id=0` 加密 + `BuildCodeMemory` + 调用新路径。
+
+#### 语义/不变量（必须测死，后续不得漂移）
+- 取指流程顺序固定：对齐检查 → VA→物理偏移计算 → 边界检查 → EWC query → 读 32 字节 → 反序列化 → 解密。
+- PC bounds check 降为内存可寻址性检查（`pc` 对齐且物理偏移在 `code_memory` 范围内），安全语义全部由 EWC 承担。
+- 代码/数据分离（W⊕X）：FetchStage 只读 `code_memory`，LD/ST 只访问 `data_memory`，无交叉访问路径。
+- VA→物理偏移映射：`byte_offset = (pc - region_base_va) / kInstrBytes * kCipherUnitBytes`，封装在 FetchStage 内部。
+- 兼容 wrapper 中 `key_id=0` 加密路径无特殊分支，行为自洽。
+- 向后兼容：Issue 0-5 旧测试通过兼容 wrapper 全部无 regression。
+
+#### 测试计划（测试名 + 核心断言点）
+- `SerializeDeserializeCipherUnit_Roundtrip`：序列化 → 反序列化 → 与原始一致。
+- `FetchStage_FromCodeMemory_RunsToHalt`：code_memory 取指 → 解密 → 正常执行到 HALT。
+- `FetchStage_MisalignedPc_TrapsInvalidPc`：未对齐 PC → INVALID_PC。
+- `FetchStage_OutOfBoundsPc_TrapsInvalidPc`：越界 PC → INVALID_PC。
+- 删除 `Execute_PseudoDecrypt_CiphertextSizeMismatch_Throws`。
+- 兼容回归：Issue 0-5 全部旧测试继续通过（通过 4 参数 wrapper）。
+- `demo_normal` 使用新取指路径，行为与改造前一致。
+
+#### 验收命令（仅列出，将由用户批准后执行）
+- `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+- `cmake --build build`
+- `ctest --test-dir build`
+- `./build/demo_normal`
+
+#### 设计决策记录
+
+**D-1：密文字节存储**
+- 决策：`code_memory[]` 存 `CipherInstrUnit` 序列化字节（32B/指令）。
+- 原因：可演示多层防御——EWC 拦截 + 错误 key 解密失败。
+
+**D-2：代码/数据存储分离**
+- 决策：`code_memory`（FetchStage 只读）与 `data_memory`（LD/ST 读写）物理分离。
+- 原因：改动最小；天然建模 W⊕X 不变量。
+
+**D-3：PC bounds check 降级**
+- 决策：FetchStage 的 PC 检查从"安全检查"降为"内存可寻址性检查"，安全语义全部由 EWC 承担。
+- 原因：解决跨用户跳转在 EWC 检查前触发数组越界的核心问题。
+
+**D-4：VA 步长 4，物理步长 32**
+- 决策：映射公式封装在 FetchStage 内部，EWC 和 Executor 上层无感知。
+- 原因：toy ISA 未做指令编码压缩，安全语义不受影响。
+
+**D-5：保留旧 wrapper 兼容**
+- 决策：4 参数 `ExecuteProgram` 作为兼容层，内部用 `key_id=0` 加密 + 序列化。
+- 原因：避免同时迁移所有测试调用点，模糊 regression 来源。
+
+**D-6：删除 CiphertextSizeMismatch 测试**
+- 决策：移除 `ciphertext` 字段后，长度校验责任交给上层调用方。
+- 原因：`code_memory` 是调用方构建的字节数组，executor 只需确保取指不越界。
+
+**D-7：region_base_va 通过 ExecuteOptions 传入**
+- 决策：`ExecuteOptions` 新增 `region_base_va` 字段。
+- 原因：FetchStage 需要做 VA→物理偏移计算，当前单 region 场景下等于程序 `base_va`。
+
+#### Codex 可行性检查结果摘要
+- `program.code[index]` 在 executor.cpp 中只有 1 处直接取指（L171），间接依赖 `program.code.size()` 有多处。
+- `FetchPacket.index` 在 FetchStage 外只有 3 处 `pc_relative_overflow` 诊断引用。
+- `ExecuteOptions.ciphertext` 移除后影响：test_executor.cpp 4 处 + test_gateway.cpp 1 处 + demo_normal.cpp 2 处。
+- 序列化接口无命名冲突：现有 `SerializeInstr`/`DeserializeInstr` 在匿名命名空间内。
+- `key_id=0` 无特殊分支，兼容 wrapper 路径自洽。
+- `program.base_va` 在 FetchStage 外仍有 `pc_relative_overflow` 诊断和 wrapper 中的 EWC window 生成依赖。
+
+### 实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 改动摘要（diff 风格）
+- `demos/normal/demo_normal.cpp | 15 +++--`
+- `include/core/executor.hpp | 12 ++--`
+- `include/security/code_codec.hpp | 5 ++`
+- `src/core/executor.cpp | 128 +++++++++++++--------------------------`
+- `src/security/code_codec.cpp | 57 ++++++++++++++++++`
+- `tests/test_executor.cpp | 130 ++++++++++++++++++++++++----------------`
+- `tests/test_gateway.cpp | 8 ++-`
+- `7 files changed, 204 insertions(+), 151 deletions(-)`
+
+#### 关键文件逐条复盘
+- `include/security/code_codec.hpp`：新增 `kCipherUnitBytes`、`SerializeCipherUnit`、`DeserializeCipherUnit`、`BuildCodeMemory` 声明，统一 code image 的字节级表示。
+- `src/security/code_codec.cpp`：实现密文单元序列化/反序列化与 `BuildCodeMemory`，把 `CipherProgram` 落成连续 `code_memory` 字节数组。
+- `include/core/executor.hpp`：`ExecuteOptions` 新增 `region_base_va`、`code_memory`、`code_memory_size`，移除 `ciphertext`；`ExecuteProgram` 签名收敛为 `(entry_pc, options)`，删除 4 参数兼容 wrapper。
+- `src/core/executor.cpp`：FetchStage 改为按 `region_base_va + code_memory` 映射取 32B 密文，先做地址/边界检查，再过 EWC，再反序列化并解密；同时删除明文取指路径和 options 版本中的 `program` 死参数。
+- `tests/test_executor.cpp`：新增 `RunAllowAll` helper，下沉 allow-all 逻辑；所有执行器测试改走 `BuildCodeMemory + ExecuteOptions` 新接口，并删除 `CiphertextSizeMismatch` 旧测试。
+- `tests/test_gateway.cpp`：适配新的 `ExecuteOptions` 字段和 `ExecuteProgram` 调用签名，维持 gateway 审计路径回归。
+- `demos/normal/demo_normal.cpp`：demo 改为显式构建 `code_memory` 并调用收敛后的执行接口，继续覆盖 allow 与 wrong-key 两条演示路径。
+
+#### 行为变化总结
+- 新增能力：
+  - Fetch 统一从 `code_memory` 字节数组取指，明文对象数组路径已移除，执行器始终走密文反序列化 + 解密链路。
+  - `code_codec` 现在可把 `CipherProgram` 稳定转换为连续字节内存，demo、测试与执行器共享同一套表示。
+  - `ExecuteProgram` 调用面收敛为 `(entry_pc, options)`，allow-all 兼容逻辑不再留在生产接口，而是下沉到测试 helper `RunAllowAll`。
+- 失败模式/Trap：
+  - 配置错误改为在执行前直接抛 `std::runtime_error`：`code_memory_not_configured`、`code_memory_empty`、`code_memory_size_not_aligned`。
+  - Fetch 的 `INVALID_PC` 诊断字段改为围绕 `pc/base_va/code_memory_size`；错误 key 或被篡改密文继续落到 `DECRYPT_DECODE_FAIL`。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - `git diff --stat`
+  - `git diff --stat -- demos/normal/demo_normal.cpp include/core/executor.hpp include/security/code_codec.hpp src/core/executor.cpp src/security/code_codec.cpp tests/test_executor.cpp tests/test_gateway.cpp`
+  - `cmake --build build`
+  - `ctest --test-dir build --output-on-failure`
+  - `./build/demo_normal`
+- 已通过测试：
+  - `sanity`
+  - `isa_assembler`
+  - `executor`
+  - `gateway`
+  - `demo_normal`：allow 路径输出 `HALT`，wrong-key 路径输出 `DECRYPT_DECODE_FAIL`
+
+#### 已知限制 & 下一步建议
+- 当前 `region_base_va -> code_memory` 仍是单连续 region 映射，尚未覆盖多段 code image 或稀疏装载场景。
+- `RunAllowAll` 只保留在测试侧，后续若还需要无安全硬件的便捷运行入口，应由上层显式决定是否补新的 helper，而不是回退到 executor 对外兼容 wrapper。

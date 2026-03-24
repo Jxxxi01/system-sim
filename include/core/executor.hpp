@@ -7,9 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "isa/assembler.hpp"
 #include "security/audit.hpp"
-#include "security/code_codec.hpp"
 #include "security/ewc.hpp"
 
 namespace sim::core {
@@ -50,14 +48,12 @@ struct ExecuteOptions {
   sim::security::ContextHandle context_handle = 0;
   const sim::security::EwcTable* ewc = nullptr;
   sim::security::AuditCollector* audit = nullptr;
-  const sim::security::CipherProgram* ciphertext = nullptr;
+  std::uint64_t region_base_va = 0;
+  const std::uint8_t* code_memory = nullptr;
+  std::size_t code_memory_size = 0;
 };
 
-ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc,
-                          const ExecuteOptions& options);
-
-ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc,
-                          std::size_t mem_size = 64 * 1024, std::size_t max_steps = 1000000);
+ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options);
 
 const char* TrapReasonToString(TrapReason reason);
 void PrintRunSummary(const ExecResult& result, std::ostream& os);

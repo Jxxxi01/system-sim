@@ -7,3 +7,6 @@ mem/
 step*_prompt*.txt
 step*_prompt*.md
 *_old.md
+step1_later_issues.txt
+.cache/
+docs/Issue6A_Decision_Summary.md

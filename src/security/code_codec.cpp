@@ -10,6 +10,8 @@ namespace sim::security {
 namespace {
 
 constexpr std::size_t kPayloadBytes = 24;
+constexpr std::size_t kKeyCheckOffset = kPayloadBytes;
+constexpr std::size_t kTagOffset = kPayloadBytes + sizeof(std::uint32_t);
 constexpr std::size_t kOpOffset = 0;
 constexpr std::size_t kRdOffset = 1;
 constexpr std::size_t kRs1Offset = 5;
@@ -63,6 +65,12 @@ std::uint32_t MakeTag(const std::array<std::uint8_t, kPayloadBytes>& payload, st
   return static_cast<std::uint32_t>(acc ^ (acc >> 32));
 }
 
+void WriteU32LE(std::uint8_t* out, std::uint32_t value) {
+  for (std::size_t i = 0; i < 4; ++i) {
+    out[i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffu);
+  }
+}
+
 void WriteU32LE(std::array<std::uint8_t, kPayloadBytes>* out, std::size_t offset, std::uint32_t value) {
   for (std::size_t i = 0; i < 4; ++i) {
     (*out)[offset + i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffu);
@@ -79,6 +87,14 @@ std::uint32_t ReadU32LE(const std::array<std::uint8_t, kPayloadBytes>& bytes, st
   std::uint32_t value = 0;
   for (std::size_t i = 0; i < 4; ++i) {
     value |= static_cast<std::uint32_t>(bytes[offset + i]) << (i * 8);
+  }
+  return value;
+}
+
+std::uint32_t ReadU32LE(const std::uint8_t* bytes) {
+  std::uint32_t value = 0;
+  for (std::size_t i = 0; i < 4; ++i) {
+    value |= static_cast<std::uint32_t>(bytes[i]) << (i * 8);
   }
   return value;
 }
@@ -153,6 +169,47 @@ CipherProgram EncryptProgram(const sim::isa::AsmProgram& program, std::uint32_t 
   }
 
   return output;
+}
+
+std::array<std::uint8_t, kCipherUnitBytes> SerializeCipherUnit(const CipherInstrUnit& unit) {
+  std::array<std::uint8_t, kCipherUnitBytes> bytes{};
+  for (std::size_t i = 0; i < unit.payload.size(); ++i) {
+    bytes[i] = unit.payload[i];
+  }
+  WriteU32LE(bytes.data() + kKeyCheckOffset, unit.key_check);
+  WriteU32LE(bytes.data() + kTagOffset, unit.tag);
+  return bytes;
+}
+
+CipherInstrUnit DeserializeCipherUnit(const std::uint8_t* data, std::size_t len) {
+  if (data == nullptr) {
+    throw std::runtime_error("cipher_unit_null_data");
+  }
+  if (len < kCipherUnitBytes) {
+    throw std::runtime_error("cipher_unit_size_mismatch");
+  }
+
+  CipherInstrUnit unit;
+  for (std::size_t i = 0; i < unit.payload.size(); ++i) {
+    unit.payload[i] = data[i];
+  }
+  unit.key_check = ReadU32LE(data + kKeyCheckOffset);
+  unit.tag = ReadU32LE(data + kTagOffset);
+  return unit;
+}
+
+std::vector<std::uint8_t> BuildCodeMemory(const CipherProgram& program) {
+  if (program.size() > (std::numeric_limits<std::size_t>::max() / kCipherUnitBytes)) {
+    throw std::runtime_error("code_memory_size_overflow");
+  }
+
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(program.size() * kCipherUnitBytes);
+  for (const CipherInstrUnit& unit : program) {
+    const std::array<std::uint8_t, kCipherUnitBytes> serialized = SerializeCipherUnit(unit);
+    bytes.insert(bytes.end(), serialized.begin(), serialized.end());
+  }
+  return bytes;
 }
 
 DecryptResult DecryptInstr(const CipherInstrUnit& unit, std::uint32_t key_id, std::uint64_t pc) {

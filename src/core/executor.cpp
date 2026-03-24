@@ -20,19 +20,16 @@ namespace {
 struct FetchPacket {
   std::uint64_t pc = 0;
   std::uint64_t next_pc = 0;
-  std::size_t index = 0;
   std::uint32_t owner_user_id = 0;
   std::uint32_t key_id = 0;
-  bool has_cipher = false;
-  sim::isa::Instr instr;
   sim::security::CipherInstrUnit cipher;
 };
 
-std::string MakeInvalidPcMsg(std::uint64_t pc, std::uint64_t base_va, std::string_view index,
-                             std::size_t code_size, const char* reason) {
+std::string MakeInvalidPcMsg(std::uint64_t pc, std::uint64_t base_va, std::size_t code_memory_size,
+                             const char* reason) {
   std::ostringstream oss;
   oss << "invalid_pc reason=" << reason << " pc=" << pc << " base_va=" << base_va
-      << " index=" << index << " code_size=" << code_size;
+      << " code_memory_size=" << code_memory_size;
   return oss.str();
 }
 
@@ -124,31 +121,38 @@ bool AddPcRelative(std::uint64_t next_pc, std::int64_t imm, std::uint64_t* out_p
   return true;
 }
 
-bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc,
-                const sim::security::EwcTable& ewc, sim::security::ContextHandle context_handle,
-                const sim::security::CipherProgram* ciphertext, FetchPacket* packet, Trap* trap,
-                std::string* deny_detail) {
-  const std::uint64_t base_va = program.base_va;
-  const std::size_t code_size = program.code.size();
-
-  if (pc < base_va) {
+bool FetchStage(std::uint64_t pc, const sim::security::EwcTable& ewc,
+                sim::security::ContextHandle context_handle, const std::uint8_t* code_memory,
+                std::size_t code_memory_size, std::uint64_t region_base_va, FetchPacket* packet,
+                Trap* trap, std::string* deny_detail) {
+  if (pc < region_base_va) {
     *trap = Trap{TrapReason::INVALID_PC, pc,
-                 MakeInvalidPcMsg(pc, base_va, "-1", code_size, "underflow")};
+                 MakeInvalidPcMsg(pc, region_base_va, code_memory_size, "underflow")};
     return false;
   }
 
-  const std::uint64_t delta = pc - base_va;
-  const std::uint64_t index = delta / sim::isa::kInstrBytes;
-  // Alignment is defined relative to program image base, not absolute address.
+  const std::uint64_t delta = pc - region_base_va;
   if ((delta % sim::isa::kInstrBytes) != 0) {
     *trap = Trap{TrapReason::INVALID_PC, pc,
-                 MakeInvalidPcMsg(pc, base_va, std::to_string(index), code_size, "misaligned")};
+                 MakeInvalidPcMsg(pc, region_base_va, code_memory_size, "misaligned")};
     return false;
   }
 
-  if (index >= code_size) {
+  const unsigned __int128 instr_index = static_cast<unsigned __int128>(delta / sim::isa::kInstrBytes);
+  const unsigned __int128 byte_offset =
+      instr_index * static_cast<unsigned __int128>(sim::security::kCipherUnitBytes);
+  const unsigned __int128 byte_end =
+      byte_offset + static_cast<unsigned __int128>(sim::security::kCipherUnitBytes);
+  const unsigned __int128 max_size = static_cast<unsigned __int128>(std::numeric_limits<std::size_t>::max());
+  if (byte_end > max_size) {
     *trap = Trap{TrapReason::INVALID_PC, pc,
-                 MakeInvalidPcMsg(pc, base_va, std::to_string(index), code_size, "oob")};
+                 MakeInvalidPcMsg(pc, region_base_va, code_memory_size, "byte_offset_overflow")};
+    return false;
+  }
+
+  if (byte_end > static_cast<unsigned __int128>(code_memory_size)) {
+    *trap = Trap{TrapReason::INVALID_PC, pc,
+                 MakeInvalidPcMsg(pc, region_base_va, code_memory_size, "oob")};
     return false;
   }
 
@@ -161,26 +165,17 @@ bool FetchStage(const sim::isa::AsmProgram& program, std::uint64_t pc,
 
   packet->pc = pc;
   packet->next_pc = pc + sim::isa::kInstrBytes;
-  packet->index = static_cast<std::size_t>(index);
   packet->owner_user_id = query_result.owner_user_id;
   packet->key_id = query_result.key_id;
-  packet->has_cipher = (ciphertext != nullptr);
-  if (packet->has_cipher) {
-    packet->cipher = (*ciphertext)[packet->index];
-  } else {
-    packet->instr = program.code[packet->index];
-  }
+  const std::size_t byte_offset_size_t = static_cast<std::size_t>(byte_offset);
+  packet->cipher = sim::security::DeserializeCipherUnit(code_memory + byte_offset_size_t,
+                                                        sim::security::kCipherUnitBytes);
 
   return true;
 }
 
 bool DecodeStage(const FetchPacket& packet, sim::security::ContextHandle context_handle, sim::isa::Instr* instr,
                  Trap* trap, std::string* decrypt_detail) {
-  if (!packet.has_cipher) {
-    *instr = packet.instr;
-    return true;
-  }
-
   const sim::security::DecryptResult decrypt_result =
       sim::security::DecryptInstr(packet.cipher, packet.key_id, packet.pc);
   if (!decrypt_result.ok) {
@@ -234,13 +229,15 @@ void LogAudit(sim::security::AuditCollector* audit, std::string type, std::uint3
   }
 }
 
-ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc,
-                          const ExecuteOptions& options) {
-  if (options.ciphertext != nullptr && options.ciphertext->size() != program.code.size()) {
-    std::ostringstream oss;
-    oss << "ciphertext_size_mismatch code_size=" << program.code.size()
-        << " ciphertext_size=" << options.ciphertext->size();
-    throw std::runtime_error(oss.str());
+ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options) {
+  if (options.code_memory == nullptr) {
+    throw std::runtime_error("code_memory_not_configured");
+  }
+  if (options.code_memory_size == 0) {
+    throw std::runtime_error("code_memory_empty");
+  }
+  if ((options.code_memory_size % sim::security::kCipherUnitBytes) != 0) {
+    throw std::runtime_error("code_memory_size_not_aligned");
   }
 
   ExecResult result;
@@ -274,8 +271,9 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
     FetchPacket fetched;
     Trap fetch_trap;
     std::string deny_detail;
-    if (!FetchStage(program, result.state.pc, *options.ewc, options.context_handle, options.ciphertext,
-                    &fetched, &fetch_trap, &deny_detail)) {
+    if (!FetchStage(result.state.pc, *options.ewc, options.context_handle, options.code_memory,
+                    options.code_memory_size, options.region_base_va, &fetched, &fetch_trap,
+                    &deny_detail)) {
       if (!deny_detail.empty()) {
         LogAudit(options.audit, "EWC_ILLEGAL_PC", 0, options.context_handle, fetch_trap.pc, std::move(deny_detail));
       }
@@ -374,8 +372,7 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
         if (!AddPcRelative(fetched.next_pc, instr.imm, &committed_pc)) {
           std::ostringstream oss;
           oss << "invalid_pc reason=pc_relative_overflow pc=" << fetched.pc
-              << " base_va=" << program.base_va << " index=" << fetched.index
-              << " code_size=" << program.code.size();
+              << " base_va=" << options.region_base_va << " fault_pc=" << fetched.pc;
           exec_trap = Trap{TrapReason::INVALID_PC, fetched.pc, oss.str()};
           has_trap = true;
         }
@@ -390,8 +387,7 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
           if (!AddPcRelative(fetched.next_pc, instr.imm, &committed_pc)) {
             std::ostringstream oss;
             oss << "invalid_pc reason=pc_relative_overflow pc=" << fetched.pc
-                << " base_va=" << program.base_va << " index=" << fetched.index
-                << " code_size=" << program.code.size();
+                << " base_va=" << options.region_base_va << " fault_pc=" << fetched.pc;
             exec_trap = Trap{TrapReason::INVALID_PC, fetched.pc, oss.str()};
             has_trap = true;
           }
@@ -403,8 +399,7 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
         if (!AddPcRelative(fetched.next_pc, instr.imm, &committed_pc)) {
           std::ostringstream oss;
           oss << "invalid_pc reason=pc_relative_overflow pc=" << fetched.pc
-              << " base_va=" << program.base_va << " index=" << fetched.index
-              << " code_size=" << program.code.size();
+              << " base_va=" << options.region_base_va << " fault_pc=" << fetched.pc;
           exec_trap = Trap{TrapReason::INVALID_PC, fetched.pc, oss.str()};
           has_trap = true;
         }
@@ -445,43 +440,6 @@ ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t ent
   }
 
   return result;
-}
-
-ExecResult ExecuteProgram(const sim::isa::AsmProgram& program, std::uint64_t entry_pc, std::size_t mem_size,
-                          std::size_t max_steps) {
-  sim::security::EwcTable temp_ewc;
-  if (!program.code.empty()) {
-    sim::security::ExecWindow allow_all;
-    allow_all.window_id = 1;
-    allow_all.start_va = program.base_va;
-    allow_all.owner_user_id = 0;
-    allow_all.key_id = 0;
-    allow_all.type = sim::security::ExecWindowType::CODE;
-    allow_all.code_policy_id = 0;
-
-    const unsigned __int128 span =
-        static_cast<unsigned __int128>(program.code.size()) * sim::isa::kInstrBytes;
-    const unsigned __int128 end128 = static_cast<unsigned __int128>(program.base_va) + span;
-    const unsigned __int128 max_u64 = static_cast<unsigned __int128>(std::numeric_limits<std::uint64_t>::max());
-    if (end128 > max_u64) {
-      ExecResult error;
-      error.state.pc = entry_pc;
-      error.state.regs.fill(0);
-      error.state.mem.assign(mem_size, 0);
-      error.trap = Trap{TrapReason::INVALID_PC, entry_pc, "invalid_pc reason=allow_all_window_overflow"};
-      return error;
-    }
-    // end_va is exclusive: [base_va, base_va + code_size * kInstrBytes)
-    allow_all.end_va = static_cast<std::uint64_t>(end128);
-    temp_ewc.SetWindows(0, std::vector<sim::security::ExecWindow>{allow_all});
-  }
-
-  ExecuteOptions options;
-  options.mem_size = mem_size;
-  options.max_steps = max_steps;
-  options.context_handle = 0;
-  options.ewc = &temp_ewc;
-  return ExecuteProgram(program, entry_pc, options);
 }
 
 const char* TrapReasonToString(TrapReason reason) {

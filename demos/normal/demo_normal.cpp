@@ -3,6 +3,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
@@ -63,6 +64,7 @@ start:
     const std::uint64_t base_va = 0x1000;
     const sim::isa::AsmProgram program = sim::isa::AssembleText(source, base_va);
     const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 11);
+    const std::vector<std::uint8_t> code_memory = sim::security::BuildCodeMemory(ciphertext);
     const std::uint64_t end_va = base_va + program.code.size() * sim::isa::kInstrBytes;
 
     sim::security::SecurityHardware hardware;
@@ -76,8 +78,10 @@ start:
     allow_options.context_handle = allow_handle;
     allow_options.ewc = &hardware.GetEwcTable();
     allow_options.audit = &hardware.GetAuditCollector();
-    allow_options.ciphertext = &ciphertext;
-    const sim::core::ExecResult allow_result = sim::core::ExecuteProgram(program, base_va, allow_options);
+    allow_options.region_base_va = base_va;
+    allow_options.code_memory = code_memory.data();
+    allow_options.code_memory_size = code_memory.size();
+    const sim::core::ExecResult allow_result = sim::core::ExecuteProgram(base_va, allow_options);
 
     std::cout << "[CASE_A_ALLOW]\n";
     sim::core::PrintRunSummary(allow_result, std::cout);
@@ -91,9 +95,10 @@ start:
     wrong_key_options.context_handle = wrong_key_handle;
     wrong_key_options.ewc = &hardware.GetEwcTable();
     wrong_key_options.audit = &hardware.GetAuditCollector();
-    wrong_key_options.ciphertext = &ciphertext;
-    const sim::core::ExecResult wrong_key_result =
-        sim::core::ExecuteProgram(program, base_va, wrong_key_options);
+    wrong_key_options.region_base_va = base_va;
+    wrong_key_options.code_memory = code_memory.data();
+    wrong_key_options.code_memory_size = code_memory.size();
+    const sim::core::ExecResult wrong_key_result = sim::core::ExecuteProgram(base_va, wrong_key_options);
     std::cout << "[CASE_B_WRONG_KEY]\n";
     sim::core::PrintRunSummary(wrong_key_result, std::cout);
     PrintArtifacts(wrong_key_result, hardware.GetAuditCollector());

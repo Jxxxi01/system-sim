@@ -32,11 +32,14 @@ Step 5: Claude Code → Codex — send coding prompt (confirmed plan as spec)
 Step 6a: Claude Code → Codex (--read-only) — code review
          (Construct review prompt with: Phase A plan + review-code checklist + changed file list.
           Codex reads code, compiles, runs tests, checks against checklist, outputs review report.
-          This is a disposable session — do NOT record session_id, do NOT reuse.)
+          Log session_id to mem/codex/sessions.log. Reuse this session via --session for
+          follow-up questions in Step 6b and for re-review after rework.)
 Step 6b: Claude Code — read review report, judge results
          (ALL PASS → proceed to Step 7.
-          FAIL items → sync with user, then use coding session --session to notify Codex to fix.
-          NEEDS_HUMAN_DECISION → discuss with user first.)
+          FAIL items → sync with user, then use coding session --session to fix,
+                        then re-review via Step 6a review session --session.
+          NEEDS_HUMAN_DECISION → discuss with user first.
+          Review session released before Step 7.)
 Step 7: Codex — write Phase B (implementation recap) to docs/project_log.md
 Step 8: User — manual check + git push; Claude Code appends push status to log
 ```
@@ -147,44 +150,51 @@ See AGENTS.md for coding rules, build/test requirements.
 
 ## Codex Session Management
 
-After each Codex invocation, log the session to `mem/codex/sessions.log` (append-only):
+### Session logging
+
+After EVERY Codex invocation (all three session types), immediately append to `mem/codex/sessions.log`:
 
 ```bash
 mkdir -p mem/codex
-echo "[module] | session_id=[id] | type=[read-only/coding] | output=[output_path from ask_codex.sh] | summary=[one-line summary] | status=[status] | $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> mem/codex/sessions.log
+echo "[module] | session_id=[id] | step=[2/5/6a] | type=[read-only/coding] | output=[output_path] | summary=[一句话概要] | result=[success/error] | $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> mem/codex/sessions.log
 ```
 
-Each entry should record: module/Issue, session type, output file path (the `output_path=...` value printed by `ask_codex.sh`), a brief summary, and status (open/completed/needs-resume).
+Fields: module/Issue, workflow step, session type, runtime log path (`output_path` from ask_codex.sh), brief summary, result of this invocation (success/error).
 
-Exception: Step 6a review sessions are disposable — do NOT log their session_id. Only log feasibility check (Step 2) and coding (Step 5) sessions.
+This is the single write point for sessions.log. No other skill or procedure writes to this file.
 
-### Session reuse rules (mandatory)
+### Session lifecycle (per Issue)
 
-1. Each Issue's coding task (Step 5) uses one Codex coding session.
-2. Follow-up fixes within the same Issue (e.g., fixing FAIL items from review) **must** use `--session <id>` to continue the existing coding session. Do NOT start a new session.
-3. If `--session` continuation fails (error), you **must**:
+Each Issue uses up to 3 independent Codex sessions. None are reused across Issues.
+
+```
+┌─ Feasibility review session (Step 2)
+│   Opened: Step 2
+│   Reused in: Step 3 (follow-up questions via --session)
+│   Released: after Step 3 (plan finalized)
+│
+├─ Coding session (Step 5)
+│   Opened: Step 5
+│   Reused in: Step 6b (rework via --session, may repeat)
+│   Released: before Step 7
+│   NOTE: This is the ONLY session that crosses Step boundaries.
+│
+└─ Code review session (Step 6a)
+    Opened: Step 6a (first review round)
+    Reused in: Step 6b (follow-up questions via --session)
+               If rework occurs, reuse for re-review (--session)
+    Released: before Step 7
+```
+
+### Session reuse rules
+
+1. Within an Issue, reuse sessions via `--session <id>` as described above.
+2. Do NOT carry any session across Issues. Each new Issue starts with fresh sessions.
+3. If `--session` continuation fails (error), you MUST:
    - Report the error to the user
-   - Discuss next steps with the user (retry after fixing the issue, or user explicitly approves a new session)
-   - **Never** silently skip the error and start a new session
-4. When resuming a previous session: check `mem/codex/sessions.log` for the session_id and summary.
-
-### Cross-issue session continuity
-
-By default, continue the previous Issue's coding session into the next Issue using `--session`. This preserves Codex's context about design decisions and implementation patterns.
-
-Start a fresh session only when:
-- The session is stale (different day or major context change)
-- The user explicitly requests a new session
-
-The same applies to read-only (feasibility check) sessions: continue across Issues by default.
-
-### Codex session handoff
-
-When a Codex session needs to be retired (e.g., context is getting large, or user requests a fresh start):
-
-1. Send a final `--session` call with the prompt: "Summarize this session's key context: implementation decisions made, known issues, patterns established, and recommendations for the next session. Output in a structured handoff format."
-2. Save the output to `mem/codex/handoff_<session_id>.md`
-3. When starting the new session, pass the handoff file via `--file mem/codex/handoff_<session_id>.md` so the new session inherits the context.
+   - Discuss next steps (retry or user approves a new session)
+   - NEVER silently start a new session
+4. When resuming a previous session: check `mem/codex/sessions.log` for the session_id and its summary.
 
 ## Human-in-the-Loop Rules
 
