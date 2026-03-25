@@ -1497,3 +1497,150 @@
 #### 已知限制 & 下一步建议
 - 当前默认物理页分配仍采用 `IdentityMappedPageAllocator`（`va / kPageSize`），依赖“地址空间互不重叠”的原型前提；若后续引入真实物理页管理，需要替换 allocator 实现并补充冲突测试。
 - 目前 PVT 集成在 `LoadProcess()` 的 secure page load 路径中，尚未扩展为独立 demo；按既定计划，演示路径留到后续 Issue 9。
+
+---
+
+## Issue 8：SPE 模拟器最小闭环（Phase A — 方案确认）
+**日期：** 2026-03-25
+**分支：** issue-8-spe
+**状态：** 方案已确认
+
+### 目标
+实现 SPE（可配置安全策略引擎）CFI 检查（L1/L2/L3），挂载到 Executor pipeline，违规触发 `SPE_VIOLATION`。附带清理 `ExecuteOptions` 遗留字段，统一走 `SecurityHardware` 路径。
+
+### Scope
+- **做**：CFI L1/L2/L3（Decode/Execute 阶段 shadow stack + 目标白名单）；`ExecuteOptions` 遗留字段清理
+- **不做**：Memory 阶段 bounds 检查；独立 demo（留 Issue 9）
+
+### 架构决策
+
+**D1：SpeTable 宿主与接入方式**
+- `SpeTable` 作为 `SecurityHardware` 成员（与 EwcTable、PvtTable 并列），通过 `GetSpeTable()` 访问
+- Gateway `Load()` 配置：`hardware_.GetSpeTable().ConfigurePolicy(handle, ...)`
+- Gateway `Release()` 清理：`hardware_.GetSpeTable().ClearPolicy(handle)`
+- Executor 通过 `hardware->GetSpeTable()` 访问
+
+**D2：Pipeline 单一插入点**
+- SPE 检查在 switch 块（Decode+Execute）之后、`has_trap` 检查之后、PC 提交之前，作为单一插入点
+- 仅当 switch 未产生 trap 时才调用 SPE（避免对无效 `committed_pc` 误检查）
+- 架构依据：模拟器为顺序执行，不存在推测执行，单一插入点功能等价于分阶段检查
+- SPE 内部根据指令类型标注逻辑阶段（`stage=decode` / `stage=execute`），写入 audit detail
+- Audit 归属：SpeTable 在 `ConfigurePolicy` 时存储 `user_id`，违规时由 SpeTable 自行写 audit（与 EWC 模式一致），executor 不参与 SPE audit 写入
+
+**D3：CFI Level 语义**
+- L1：无 CFI 检查（仅 EWC 保护），SPE 对所有指令返回 pass
+- L2：shadow stack only — CALL push return addr，RET pop + 比对
+- L3：shadow stack + call_targets/jmp_targets 白名单
+
+**D4：Toy ISA 控制流映射**
+
+| 指令 | 目标来源 | 逻辑阶段 | L1 | L2 | L3 |
+|------|---------|---------|----|----|------|
+| CALL | pc-relative (imm) | decode | pass | push shadow stack | push + check target ∈ call_targets |
+| J | pc-relative (imm) | decode | pass | pass | check target ∈ jmp_targets |
+| BEQ (taken) | pc-relative (imm) | decode | pass | pass | check target ∈ jmp_targets |
+| RET | register (r1) | execute | pass | pop + compare | pop + compare |
+| 其他 | — | — | pass | pass | pass |
+
+BEQ 未跳转时 `committed_pc == fetched.next_pc`，SPE 据此判断 not-taken，直接 pass。
+
+**D5：ExecuteOptions 遗留字段清理**
+- 删除：`ewc`, `audit`, `context_handle`, `region_base_va`, `code_memory`, `code_memory_size`
+- 保留：`mem_size`, `max_steps`, `hardware`
+- 所有调用点统一通过 `hardware` 获取 EWC/SPE/Audit/CodeRegion/ActiveHandle
+- `hardware == nullptr` 时：函数开头直接 `throw std::runtime_error("hardware_not_configured")`（编程错误，非运行时安全事件，不写 audit）
+
+**D6：Gateway 回滚**
+- `Load()` 执行顺序：SetWindows → ConfigurePolicy → handle_to_user_ → LogEvent
+- 回滚覆盖范围：从首个硬件 side effect（SetWindows）到成功返回之前的整个区间
+- 现有 try-catch 框架扩展：catch 中统一 `ClearPolicy(handle)` + `ClearWindows(handle)`（无论哪步失败都安全调用，clear 对不存在的条目应为 no-op）
+
+### 新增文件
+- `include/security/spe.hpp` — SpeTable 类定义
+- `src/security/spe.cpp` — SpeTable 实现
+- `tests/test_spe.cpp` — SPE 单元测试
+
+### 修改文件
+- `include/security/hardware.hpp` — 新增 SpeTable 成员 + GetSpeTable()
+- `include/core/executor.hpp` — 新增 TrapReason::SPE_VIOLATION；删除 ExecuteOptions 遗留字段
+- `src/core/executor.cpp` — switch 后新增 SPE 检查点；删除遗留双路径逻辑；TrapReasonToString 新增 SPE_VIOLATION
+- `src/security/gateway.cpp` — SecureIr 扩展 call_targets/jmp_targets；Load() 配置 SPE + 回滚；Release() 清理 SPE
+- `tests/test_executor.cpp` — 适配新 ExecuteOptions
+- `tests/test_gateway.cpp` — 适配新 ExecuteOptions
+- `demos/normal/demo_normal.cpp` — 适配新 ExecuteOptions
+- `CMakeLists.txt` — 新增 spe.cpp + test_spe.cpp
+
+### 测试目标
+1. L3 下 CALL 非法目标 → SPE_VIOLATION
+2. L3 下 J 非法目标 → SPE_VIOLATION
+3. L3 下合法目标 → 正常执行
+4. L2 下 RET 地址被篡改（模拟 ROP）→ SPE_VIOLATION（shadow stack 不匹配）
+5. L2 下正常 CALL/RET → 通过
+6. L1 下同样的非法跳转 → 不触发 SPE
+7. Gateway 配置的 cfi_level/call_targets/jmp_targets 正确传递到 SpeTable
+8. 遗留字段清理后，所有老测试继续通过
+9. Audit 事件包含逻辑阶段标注（stage=decode / stage=execute）
+10. Gateway 回滚：ConfigurePolicy 失败后 EWC + SPE 无残留半配置状态
+11. `hardware == nullptr` 时 ExecuteProgram 抛异常而非 crash
+
+### Feasibility 检查结论（Step 2）
+- session_id: `019d230a-1ba0-7470-a950-e2b2fb5319b0`
+- 无阻塞项
+- ExecuteOptions 遗留字段使用点完整确认：test_executor.cpp(5), test_gateway.cpp(1), demo_normal.cpp(2)
+- cross_user demo 已走 hardware 路径，不受影响
+- SecurityHardware 构造顺序支持 SpeTable（声明在 audit_collector_ 之后）
+- Gateway Release() 需同步清理 SPE
+
+---
+
+## Issue 8：SPE 模拟器最小闭环（Phase B — 实现复盘）
+**日期：** 2026-03-25
+**状态：** 实现完成
+
+### 实现摘要
+- 完成 `SpeTable` 最小闭环实现：支持 L1/L2/L3 三档 CFI 语义，覆盖 `CALL` / `J` / `BEQ(taken)` / `RET` 的控制流约束；内部按 `context_handle` 维护 shadow stack，并在违规时由 `SpeTable` 自行写入 `SPE_VIOLATION` 审计事件。
+- 完成 `ExecuteOptions` 清理：删除遗留字段 `ewc`、`audit`、`context_handle`、`region_base_va`、`code_memory`、`code_memory_size`，统一改为只通过 `SecurityHardware* hardware` 读取 EWC / SPE / Audit / CodeRegion / ActiveHandle。
+- 完成 Executor pipeline 接入：在 Decode+Execute 后、`has_trap` 检查后、PC commit 前插入单一 SPE 检查点；`hardware == nullptr` 时改为直接抛出 `std::runtime_error("hardware_not_configured")`。
+- 完成 Gateway SPE 配置与回滚：`Load()` 在 `SetWindows` 后调用 `ConfigurePolicy()`，`Release()` 清理 SPE 策略；若 `ConfigurePolicy()` 或后续步骤失败，catch 中统一执行 `ClearPolicy(handle)` + `ClearWindows(handle)`，避免半配置残留。
+
+### 文件变更清单
+- 新增文件：
+  - `include/security/spe.hpp`：新增 `SpeTable` / `SpeCheckResult` 接口定义。
+  - `src/security/spe.cpp`：实现 L1/L2/L3 CFI 检查、shadow stack、违规 detail 生成与 `SPE_VIOLATION` 审计写入。
+  - `tests/test_spe.cpp`：新增 11 个 SPE 测试，覆盖 T1-T11 全部目标。
+- 修改文件：
+  - `include/security/hardware.hpp`：新增 `SpeTable spe_table_` 成员与 `GetSpeTable()` 访问器，更新构造初始化顺序。
+  - `include/core/executor.hpp`：新增 `TrapReason::SPE_VIOLATION`，精简 `ExecuteOptions` 只保留 `mem_size` / `max_steps` / `hardware`。
+  - `src/core/executor.cpp`：删除旧双路径初始化；统一从 `hardware` 取 EWC / Audit / CodeRegion / ActiveHandle；加入 SPE 检查点并补充 `TrapReasonToString()` 分支。
+  - `src/security/gateway.cpp`：`SecureIr` 扩展 `call_targets` / `jmp_targets` 解析；`Load()` 配置 SPE；`Release()` 清理 SPE；失败路径补齐回滚。
+  - `tests/test_executor.cpp`：旧执行器测试全部改走 `SecurityHardware` 路径，并同步更新 EWC 前置门控下的 trap 断言。
+  - `tests/test_gateway.cpp`：执行器调用迁移到 `hardware` 路径，保持 Gateway + Executor 统一审计链验证。
+  - `demos/normal/demo_normal.cpp`：demo 启动流程改为 `Gateway + SecurityHardware + StoreCodeRegion + SetActiveHandle`。
+  - `CMakeLists.txt`：将 `src/security/spe.cpp` 加入 `simulator_core`，新增 `test_spe` target 并纳入 `ctest`。
+
+### 测试结果
+- 全部测试：71 个 test cases，全绿。
+- `ctest`：7/7 通过（`sanity`、`isa_assembler`、`executor`、`gateway`、`kernel_process`、`pvt`、`spe`）。
+- 新增 SPE 测试：11 个，完整覆盖 T1-T11：
+  - T1 `L3 CALL 非法目标`
+  - T2 `L3 J 非法目标`
+  - T3 `L3 合法目标`
+  - T4 `L2 RET 篡改 / shadow stack mismatch`
+  - T5 `L2 正常 CALL/RET`
+  - T6 `L1 非法跳转不触发 SPE`
+  - T7 `Gateway 策略正确传递到 SpeTable`
+  - T8 `ExecuteOptions 清理后硬件路径正常执行`
+  - T9 `Audit detail 含 stage=decode / stage=execute`
+  - T10 `Gateway 回滚后 EWC + SPE 无残留`
+  - T11 `hardware == nullptr` 抛异常
+- 已执行命令：
+  - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+  - `cmake --build build`
+  - `ctest --test-dir build`
+
+### 评审回合
+- Round 1：ALL PASS（无需返工）
+
+### 已知限制 & 下一步建议
+- 当前未实现 Memory-stage bounds check；本 Issue 仅覆盖 Fetch/Decode/Execute 相关的最小 CFI 闭环，Memory 阶段边界约束留待后续 issue 扩展。
+- SPE 独立 demo 未纳入本 Issue；按既定计划，SPE 演示路径延后到 Issue 9。

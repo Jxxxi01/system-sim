@@ -42,6 +42,7 @@ add_library(simulator_core STATIC
   src/security/ewc.cpp
   src/security/gateway.cpp
   src/security/pvt.cpp
+  src/security/spe.cpp
   src/security/scaffold.cpp
   src/kernel/scaffold.cpp
 )
@@ -117,6 +118,17 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME pvt COMMAND test_pvt)
+
+  add_executable(test_spe
+    tests/test_spe.cpp
+  )
+
+  target_link_libraries(test_spe
+    PRIVATE
+      simulator_core
+  )
+
+  add_test(NAME spe COMMAND test_spe)
 endif()
 
 add_executable(demo_normal

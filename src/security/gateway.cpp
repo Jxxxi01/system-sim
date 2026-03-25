@@ -248,6 +248,8 @@ struct SecureIr {
   std::uint64_t base_va = 0;
   std::vector<SecureIrWindow> windows;
   std::uint32_t cfi_level = 0;
+  std::vector<std::uint64_t> call_targets;
+  std::vector<std::uint64_t> jmp_targets;
 };
 
 const JsonValue::Object& RequireObject(const JsonValue& value, const char* name) {
@@ -314,10 +316,13 @@ std::string RequireStringField(const JsonValue::Object& object, const char* name
   return RequireString(RequireField(object, name), name);
 }
 
-void ValidateNumberArray(const JsonValue::Array& array, const char* name) {
+std::vector<std::uint64_t> ParseNumberArray(const JsonValue::Array& array, const char* name) {
+  std::vector<std::uint64_t> values;
+  values.reserve(array.size());
   for (const JsonValue& element : array) {
-    static_cast<void>(RequireNumber(element, name));
+    values.push_back(RequireNumber(element, name));
   }
+  return values;
 }
 
 SecureIr ParseSecureIr(const std::string& json) {
@@ -346,8 +351,10 @@ SecureIr ParseSecureIr(const std::string& json) {
   }
 
   static_cast<void>(RequireArray(RequireField(object, "pages"), "pages"));
-  ValidateNumberArray(RequireArray(RequireField(object, "call_targets"), "call_targets"), "call_targets");
-  ValidateNumberArray(RequireArray(RequireField(object, "jmp_targets"), "jmp_targets"), "jmp_targets");
+  secure_ir.call_targets =
+      ParseNumberArray(RequireArray(RequireField(object, "call_targets"), "call_targets"), "call_targets");
+  secure_ir.jmp_targets =
+      ParseNumberArray(RequireArray(RequireField(object, "jmp_targets"), "jmp_targets"), "jmp_targets");
 
   return secure_ir;
 }
@@ -417,11 +424,16 @@ ContextHandle Gateway::Load(const std::string& json) {
     }
 
     hardware_.GetEwcTable().SetWindows(handle, std::move(windows));
+    hardware_.GetSpeTable().ConfigurePolicy(handle, secure_ir.user_id, secure_ir.cfi_level,
+                                            secure_ir.call_targets, secure_ir.jmp_targets);
     handle_to_user_[handle] = secure_ir.user_id;
     hardware_.GetAuditCollector().LogEvent("GATEWAY_LOAD_OK", secure_ir.user_id, handle, secure_ir.base_va,
                                            MakeLoadOkDetail(secure_ir));
     return handle;
   } catch (const std::exception& ex) {
+    handle_to_user_.erase(handle);
+    hardware_.GetSpeTable().ClearPolicy(handle);
+    hardware_.GetEwcTable().ClearWindows(handle);
     hardware_.GetAuditCollector().LogEvent("GATEWAY_LOAD_FAIL", 0, handle, 0, MakeLoadFailDetail(ex.what()));
     throw;
   }
@@ -434,6 +446,7 @@ void Gateway::Release(ContextHandle handle) {
   if (released) {
     handle_to_user_.erase(it);
   }
+  hardware_.GetSpeTable().ClearPolicy(handle);
   hardware_.GetEwcTable().ClearWindows(handle);
   hardware_.GetAuditCollector().LogEvent("GATEWAY_RELEASE", user_id, handle, 0, MakeReleaseDetail(released));
 }

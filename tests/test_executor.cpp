@@ -14,19 +14,32 @@
 
 namespace {
 
+struct RunOutcome {
+  sim::core::ExecResult result;
+  std::vector<sim::security::AuditEvent> audit_events;
+};
+
+sim::security::ExecWindow MakeCodeWindow(std::uint32_t window_id, std::uint64_t start_va, std::uint64_t end_va,
+                                         std::uint32_t owner_user_id, std::uint32_t key_id,
+                                         std::uint32_t code_policy_id = 1) {
+  sim::security::ExecWindow window;
+  window.window_id = window_id;
+  window.start_va = start_va;
+  window.end_va = end_va;
+  window.owner_user_id = owner_user_id;
+  window.key_id = key_id;
+  window.type = sim::security::ExecWindowType::CODE;
+  window.permissions = sim::security::MemoryPermissions::RX;
+  window.code_policy_id = code_policy_id;
+  return window;
+}
+
 sim::core::ExecResult RunAllowAll(const sim::isa::AsmProgram& program, std::uint64_t entry_pc,
                                   std::size_t mem_size = 64 * 1024, std::size_t max_steps = 1000000) {
-  sim::security::EwcTable ewc;
   std::vector<std::uint8_t> code_memory;
+  sim::security::SecurityHardware hardware;
+  constexpr sim::security::ContextHandle kContextHandle = 1;
   if (!program.code.empty()) {
-    sim::security::ExecWindow allow_all;
-    allow_all.window_id = 1;
-    allow_all.start_va = program.base_va;
-    allow_all.owner_user_id = 0;
-    allow_all.key_id = 0;
-    allow_all.type = sim::security::ExecWindowType::CODE;
-    allow_all.code_policy_id = 0;
-
     const unsigned __int128 span =
         static_cast<unsigned __int128>(program.code.size()) * sim::isa::kInstrBytes;
     const unsigned __int128 end128 = static_cast<unsigned __int128>(program.base_va) + span;
@@ -41,19 +54,19 @@ sim::core::ExecResult RunAllowAll(const sim::isa::AsmProgram& program, std::uint
       return error;
     }
 
-    allow_all.end_va = static_cast<std::uint64_t>(end128);
-    ewc.SetWindows(0, std::vector<sim::security::ExecWindow>{allow_all});
+    hardware.GetEwcTable().SetWindows(
+        kContextHandle,
+        std::vector<sim::security::ExecWindow>{MakeCodeWindow(1, program.base_va, static_cast<std::uint64_t>(end128),
+                                                              0, 0, 0)});
     code_memory = sim::security::BuildCodeMemory(sim::security::EncryptProgram(program, 0));
+    hardware.StoreCodeRegion(kContextHandle, program.base_va, code_memory);
+    hardware.SetActiveHandle(kContextHandle);
   }
 
   sim::core::ExecuteOptions options;
   options.mem_size = mem_size;
   options.max_steps = max_steps;
-  options.context_handle = 0;
-  options.ewc = &ewc;
-  options.region_base_va = program.base_va;
-  options.code_memory = code_memory.data();
-  options.code_memory_size = code_memory.size();
+  options.hardware = &hardware;
   return sim::core::ExecuteProgram(entry_pc, options);
 }
 
@@ -63,33 +76,34 @@ sim::core::ExecResult Run(const std::string& text, std::uint64_t base_va, std::s
   return RunAllowAll(program, base_va, mem_size, max_steps);
 }
 
-sim::core::ExecResult RunWithEwc(const std::string& text, std::uint64_t base_va,
-                                 const sim::security::EwcTable& ewc,
-                                 sim::security::ContextHandle context_handle,
-                                 const std::vector<std::uint8_t>* code_memory = nullptr,
-                                 sim::security::AuditCollector* audit = nullptr,
-                                 std::size_t mem_size = 64 * 1024, std::size_t max_steps = 1000000) {
+RunOutcome RunWithEwc(const std::string& text, std::uint64_t base_va, const sim::security::EwcTable& ewc,
+                      sim::security::ContextHandle context_handle,
+                      const std::vector<std::uint8_t>* code_memory = nullptr,
+                      std::size_t mem_size = 64 * 1024, std::size_t max_steps = 1000000) {
   const sim::isa::AsmProgram program = sim::isa::AssembleText(text, base_va);
   std::vector<std::uint8_t> local_code_memory;
+  sim::security::SecurityHardware hardware;
+  hardware.GetEwcTable() = ewc;
   if (code_memory == nullptr) {
     std::uint32_t key_id = 0;
-    const sim::security::EwcQueryResult query_result = ewc.Query(base_va, context_handle);
+    const sim::security::EwcQueryResult query_result = hardware.GetEwcTable().Query(base_va, context_handle);
     if (query_result.allow) {
       key_id = query_result.key_id;
     }
     local_code_memory = sim::security::BuildCodeMemory(sim::security::EncryptProgram(program, key_id));
     code_memory = &local_code_memory;
   }
+  hardware.StoreCodeRegion(context_handle, base_va, *code_memory);
+  hardware.SetActiveHandle(context_handle);
+
   sim::core::ExecuteOptions options;
   options.mem_size = mem_size;
   options.max_steps = max_steps;
-  options.context_handle = context_handle;
-  options.ewc = &ewc;
-  options.audit = audit;
-  options.region_base_va = base_va;
-  options.code_memory = code_memory->data();
-  options.code_memory_size = code_memory->size();
-  return sim::core::ExecuteProgram(base_va, options);
+  options.hardware = &hardware;
+  RunOutcome outcome;
+  outcome.result = sim::core::ExecuteProgram(base_va, options);
+  outcome.audit_events = hardware.GetAuditCollector().GetEvents();
+  return outcome;
 }
 
 sim::core::ExecResult RunWithHardware(const std::string& text, std::uint64_t base_va,
@@ -107,6 +121,7 @@ sim::core::ExecResult RunWithHardware(const std::string& text, std::uint64_t bas
   window.owner_user_id = user_id;
   window.key_id = key_id;
   window.type = sim::security::ExecWindowType::CODE;
+  window.permissions = sim::security::MemoryPermissions::RX;
   window.code_policy_id = 1;
   hardware.GetEwcTable().SetWindows(context_handle, std::vector<sim::security::ExecWindow>{window});
   hardware.StoreCodeRegion(context_handle, base_va, code_memory);
@@ -195,19 +210,17 @@ SIM_TEST(Execute_InvalidPc_Cases_TrapWithDiagnostics) {
   const sim::isa::AsmProgram program = sim::isa::AssembleText(src, 0x4000);
 
   const auto underflow = RunAllowAll(program, 0x3ffc);
-  SIM_EXPECT_EQ(underflow.trap.reason, sim::core::TrapReason::INVALID_PC);
+  SIM_EXPECT_EQ(underflow.trap.reason, sim::core::TrapReason::EWC_ILLEGAL_PC);
   SIM_EXPECT_TRUE(Contains(underflow.trap.msg, "pc="));
-  SIM_EXPECT_TRUE(Contains(underflow.trap.msg, "base_va="));
-  SIM_EXPECT_TRUE(Contains(underflow.trap.msg, "code_memory_size="));
-  SIM_EXPECT_TRUE(Contains(underflow.trap.msg, "reason=underflow"));
+  SIM_EXPECT_TRUE(Contains(underflow.trap.msg, "window_id=none"));
 
   const auto misaligned = RunAllowAll(program, 0x4002);
   SIM_EXPECT_EQ(misaligned.trap.reason, sim::core::TrapReason::INVALID_PC);
   SIM_EXPECT_TRUE(Contains(misaligned.trap.msg, "reason=misaligned"));
 
   const auto oob = RunAllowAll(program, 0x4004);
-  SIM_EXPECT_EQ(oob.trap.reason, sim::core::TrapReason::INVALID_PC);
-  SIM_EXPECT_TRUE(Contains(oob.trap.msg, "reason=oob"));
+  SIM_EXPECT_EQ(oob.trap.reason, sim::core::TrapReason::EWC_ILLEGAL_PC);
+  SIM_EXPECT_TRUE(Contains(oob.trap.msg, "window_id=none"));
 }
 
 SIM_TEST(Execute_Syscall_LogsAndContinues) {
@@ -275,10 +288,9 @@ SIM_TEST(Execute_EwcAllows_ProgramRunsToHalt) {
   w.code_policy_id = 1;
   ewc.SetWindows(7, std::vector<sim::security::ExecWindow>{w});
 
-  sim::security::AuditCollector audit;
-  const auto result = RunWithEwc(src, base, ewc, 7, nullptr, &audit);
-  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
-  SIM_EXPECT_EQ(audit.GetEvents().size(), static_cast<std::size_t>(0));
+  const RunOutcome outcome = RunWithEwc(src, base, ewc, 7);
+  SIM_EXPECT_EQ(outcome.result.trap.reason, sim::core::TrapReason::HALT);
+  SIM_EXPECT_EQ(outcome.audit_events.size(), static_cast<std::size_t>(0));
 }
 
 SIM_TEST(Executor_HardwarePath_NormalExecution) {
@@ -325,16 +337,15 @@ SIM_TEST(Execute_EwcDenies_AtEntry_TrapsEwcIllegalPc) {
   w.code_policy_id = 1;
   ewc.SetWindows(9, std::vector<sim::security::ExecWindow>{w});
 
-  sim::security::AuditCollector audit;
-  const auto result = RunWithEwc(src, base, ewc, 9, nullptr, &audit);
-  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::EWC_ILLEGAL_PC);
-  SIM_EXPECT_EQ(audit.GetEvents().size(), static_cast<std::size_t>(1));
-  SIM_EXPECT_EQ(audit.GetEvents()[0].type, std::string("EWC_ILLEGAL_PC"));
-  SIM_EXPECT_EQ(audit.GetEvents()[0].context_handle, 9u);
-  SIM_EXPECT_EQ(audit.GetEvents()[0].pc, base);
-  SIM_EXPECT_TRUE(Contains(audit.GetEvents()[0].detail, "window_id=none"));
-  SIM_EXPECT_TRUE(Contains(result.trap.msg, "pc="));
-  SIM_EXPECT_TRUE(Contains(result.trap.msg, "context_handle=9"));
+  const RunOutcome outcome = RunWithEwc(src, base, ewc, 9);
+  SIM_EXPECT_EQ(outcome.result.trap.reason, sim::core::TrapReason::EWC_ILLEGAL_PC);
+  SIM_EXPECT_EQ(outcome.audit_events.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_EQ(outcome.audit_events[0].type, std::string("EWC_ILLEGAL_PC"));
+  SIM_EXPECT_EQ(outcome.audit_events[0].context_handle, 9u);
+  SIM_EXPECT_EQ(outcome.audit_events[0].pc, base);
+  SIM_EXPECT_TRUE(Contains(outcome.audit_events[0].detail, "window_id=none"));
+  SIM_EXPECT_TRUE(Contains(outcome.result.trap.msg, "pc="));
+  SIM_EXPECT_TRUE(Contains(outcome.result.trap.msg, "context_handle=9"));
 }
 
 SIM_TEST(Execute_EwcSubsetWindow_JumpOut_TrapsEwcIllegalPc) {
@@ -356,16 +367,15 @@ SIM_TEST(Execute_EwcSubsetWindow_JumpOut_TrapsEwcIllegalPc) {
   w.code_policy_id = 1;
   ewc.SetWindows(10, std::vector<sim::security::ExecWindow>{w});
 
-  sim::security::AuditCollector audit;
-  const auto result = RunWithEwc(src, base, ewc, 10, nullptr, &audit);
-  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::EWC_ILLEGAL_PC);
-  SIM_EXPECT_EQ(result.trap.pc, base + 12);  // Jump target still inside AsmProgram range.
-  SIM_EXPECT_EQ(audit.GetEvents().size(), static_cast<std::size_t>(1));
-  SIM_EXPECT_EQ(audit.GetEvents()[0].type, std::string("EWC_ILLEGAL_PC"));
-  SIM_EXPECT_EQ(audit.GetEvents()[0].context_handle, 10u);
-  SIM_EXPECT_EQ(audit.GetEvents()[0].pc, base + 12);
-  SIM_EXPECT_TRUE(Contains(audit.GetEvents()[0].detail, "window_id=none"));
-  SIM_EXPECT_TRUE(Contains(result.trap.msg, "context_handle=10"));
+  const RunOutcome outcome = RunWithEwc(src, base, ewc, 10);
+  SIM_EXPECT_EQ(outcome.result.trap.reason, sim::core::TrapReason::EWC_ILLEGAL_PC);
+  SIM_EXPECT_EQ(outcome.result.trap.pc, base + 12);  // Jump target still inside AsmProgram range.
+  SIM_EXPECT_EQ(outcome.audit_events.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_EQ(outcome.audit_events[0].type, std::string("EWC_ILLEGAL_PC"));
+  SIM_EXPECT_EQ(outcome.audit_events[0].context_handle, 10u);
+  SIM_EXPECT_EQ(outcome.audit_events[0].pc, base + 12);
+  SIM_EXPECT_TRUE(Contains(outcome.audit_events[0].detail, "window_id=none"));
+  SIM_EXPECT_TRUE(Contains(outcome.result.trap.msg, "context_handle=10"));
 }
 
 SIM_TEST(Execute_PseudoDecrypt_CorrectKey_RunsToHalt) {
@@ -391,19 +401,11 @@ SIM_TEST(Execute_PseudoDecrypt_CorrectKey_RunsToHalt) {
   w.code_policy_id = 1;
   ewc.SetWindows(11, std::vector<sim::security::ExecWindow>{w});
 
-  sim::core::ExecuteOptions options;
-  options.context_handle = 11;
-  options.ewc = &ewc;
-  sim::security::AuditCollector audit;
-  options.audit = &audit;
-  options.region_base_va = base;
-  options.code_memory = code_memory.data();
-  options.code_memory_size = code_memory.size();
-  const auto result = sim::core::ExecuteProgram(base, options);
+  const RunOutcome outcome = RunWithEwc(src, base, ewc, 11, &code_memory);
 
-  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
-  SIM_EXPECT_EQ(result.state.regs[3], 16u);
-  SIM_EXPECT_EQ(audit.GetEvents().size(), static_cast<std::size_t>(0));
+  SIM_EXPECT_EQ(outcome.result.trap.reason, sim::core::TrapReason::HALT);
+  SIM_EXPECT_EQ(outcome.result.state.regs[3], 16u);
+  SIM_EXPECT_EQ(outcome.audit_events.size(), static_cast<std::size_t>(0));
 }
 
 SIM_TEST(Execute_PseudoDecrypt_WrongKey_TrapsDecryptDecodeFail) {
@@ -427,26 +429,18 @@ SIM_TEST(Execute_PseudoDecrypt_WrongKey_TrapsDecryptDecodeFail) {
   w.code_policy_id = 1;
   ewc.SetWindows(12, std::vector<sim::security::ExecWindow>{w});
 
-  sim::core::ExecuteOptions options;
-  options.context_handle = 12;
-  options.ewc = &ewc;
-  sim::security::AuditCollector audit;
-  options.audit = &audit;
-  options.region_base_va = base;
-  options.code_memory = code_memory.data();
-  options.code_memory_size = code_memory.size();
-  const auto result = sim::core::ExecuteProgram(base, options);
+  const RunOutcome outcome = RunWithEwc(src, base, ewc, 12, &code_memory);
 
-  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
-  SIM_EXPECT_EQ(result.trap.pc, base);
-  SIM_EXPECT_EQ(audit.GetEvents().size(), static_cast<std::size_t>(1));
-  SIM_EXPECT_EQ(audit.GetEvents()[0].type, std::string("DECRYPT_DECODE_FAIL"));
-  SIM_EXPECT_EQ(audit.GetEvents()[0].user_id, 4u);
-  SIM_EXPECT_EQ(audit.GetEvents()[0].context_handle, 12u);
-  SIM_EXPECT_EQ(audit.GetEvents()[0].pc, base);
-  SIM_EXPECT_TRUE(Contains(audit.GetEvents()[0].detail, "key_id=77"));
-  SIM_EXPECT_TRUE(Contains(audit.GetEvents()[0].detail, "reason=key_check_mismatch"));
-  SIM_EXPECT_TRUE(Contains(result.trap.msg, "detail=key_check_mismatch"));
+  SIM_EXPECT_EQ(outcome.result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
+  SIM_EXPECT_EQ(outcome.result.trap.pc, base);
+  SIM_EXPECT_EQ(outcome.audit_events.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_EQ(outcome.audit_events[0].type, std::string("DECRYPT_DECODE_FAIL"));
+  SIM_EXPECT_EQ(outcome.audit_events[0].user_id, 4u);
+  SIM_EXPECT_EQ(outcome.audit_events[0].context_handle, 12u);
+  SIM_EXPECT_EQ(outcome.audit_events[0].pc, base);
+  SIM_EXPECT_TRUE(Contains(outcome.audit_events[0].detail, "key_id=77"));
+  SIM_EXPECT_TRUE(Contains(outcome.audit_events[0].detail, "reason=key_check_mismatch"));
+  SIM_EXPECT_TRUE(Contains(outcome.result.trap.msg, "detail=key_check_mismatch"));
 }
 
 SIM_TEST(Execute_PseudoDecrypt_TamperedCiphertext_TrapsDecryptDecodeFail) {
@@ -471,25 +465,17 @@ SIM_TEST(Execute_PseudoDecrypt_TamperedCiphertext_TrapsDecryptDecodeFail) {
   w.code_policy_id = 1;
   ewc.SetWindows(13, std::vector<sim::security::ExecWindow>{w});
 
-  sim::core::ExecuteOptions options;
-  options.context_handle = 13;
-  options.ewc = &ewc;
-  sim::security::AuditCollector audit;
-  options.audit = &audit;
-  options.region_base_va = base;
-  options.code_memory = code_memory.data();
-  options.code_memory_size = code_memory.size();
-  const auto result = sim::core::ExecuteProgram(base, options);
+  const RunOutcome outcome = RunWithEwc(src, base, ewc, 13, &code_memory);
 
-  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
-  SIM_EXPECT_EQ(audit.GetEvents().size(), static_cast<std::size_t>(1));
-  SIM_EXPECT_EQ(audit.GetEvents()[0].type, std::string("DECRYPT_DECODE_FAIL"));
-  SIM_EXPECT_EQ(audit.GetEvents()[0].user_id, 5u);
-  SIM_EXPECT_EQ(audit.GetEvents()[0].context_handle, 13u);
-  SIM_EXPECT_EQ(audit.GetEvents()[0].pc, base);
-  SIM_EXPECT_TRUE(Contains(audit.GetEvents()[0].detail, "key_id=91"));
-  SIM_EXPECT_TRUE(Contains(audit.GetEvents()[0].detail, "reason=tag_mismatch"));
-  SIM_EXPECT_TRUE(Contains(result.trap.msg, "detail=tag_mismatch"));
+  SIM_EXPECT_EQ(outcome.result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
+  SIM_EXPECT_EQ(outcome.audit_events.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_EQ(outcome.audit_events[0].type, std::string("DECRYPT_DECODE_FAIL"));
+  SIM_EXPECT_EQ(outcome.audit_events[0].user_id, 5u);
+  SIM_EXPECT_EQ(outcome.audit_events[0].context_handle, 13u);
+  SIM_EXPECT_EQ(outcome.audit_events[0].pc, base);
+  SIM_EXPECT_TRUE(Contains(outcome.audit_events[0].detail, "key_id=91"));
+  SIM_EXPECT_TRUE(Contains(outcome.audit_events[0].detail, "reason=tag_mismatch"));
+  SIM_EXPECT_TRUE(Contains(outcome.result.trap.msg, "detail=tag_mismatch"));
 }
 
 SIM_TEST(Ewc_SetWindows_OverlapRejected) {

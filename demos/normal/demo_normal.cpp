@@ -73,14 +73,11 @@ start:
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle allow_handle =
         gateway.Load(MakeSecureIrJson("demo_normal_allow", 1, base_va, end_va, 11, 1, "stub-valid"));
+    hardware.StoreCodeRegion(allow_handle, base_va, code_memory);
+    hardware.SetActiveHandle(allow_handle);
 
     sim::core::ExecuteOptions allow_options;
-    allow_options.context_handle = allow_handle;
-    allow_options.ewc = &hardware.GetEwcTable();
-    allow_options.audit = &hardware.GetAuditCollector();
-    allow_options.region_base_va = base_va;
-    allow_options.code_memory = code_memory.data();
-    allow_options.code_memory_size = code_memory.size();
+    allow_options.hardware = &hardware;
     const sim::core::ExecResult allow_result = sim::core::ExecuteProgram(base_va, allow_options);
 
     std::cout << "[CASE_A_ALLOW]\n";
@@ -90,14 +87,11 @@ start:
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle wrong_key_handle =
         gateway.Load(MakeSecureIrJson("demo_normal_wrong_key", 1, base_va, end_va, 99, 2, "stub-valid"));
+    hardware.StoreCodeRegion(wrong_key_handle, base_va, code_memory);
+    hardware.SetActiveHandle(wrong_key_handle);
 
     sim::core::ExecuteOptions wrong_key_options;
-    wrong_key_options.context_handle = wrong_key_handle;
-    wrong_key_options.ewc = &hardware.GetEwcTable();
-    wrong_key_options.audit = &hardware.GetAuditCollector();
-    wrong_key_options.region_base_va = base_va;
-    wrong_key_options.code_memory = code_memory.data();
-    wrong_key_options.code_memory_size = code_memory.size();
+    wrong_key_options.hardware = &hardware;
     const sim::core::ExecResult wrong_key_result = sim::core::ExecuteProgram(base_va, wrong_key_options);
     std::cout << "[CASE_B_WRONG_KEY]\n";
     sim::core::PrintRunSummary(wrong_key_result, std::cout);

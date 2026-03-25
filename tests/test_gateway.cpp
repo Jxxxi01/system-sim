@@ -265,14 +265,11 @@ SIM_TEST(AuditCollector_UnifiedEvents) {
   const std::vector<std::uint8_t> code_memory = sim::security::BuildCodeMemory(ciphertext);
   const sim::security::ContextHandle handle =
       gateway.Load(MakeSecureIrJson("demo", 5, "sig", base, MakeCodeWindowJson(1, base, base + 8, 77)));
+  hardware.StoreCodeRegion(handle, base, code_memory);
+  hardware.SetActiveHandle(handle);
 
   sim::core::ExecuteOptions options;
-  options.context_handle = handle;
-  options.ewc = &hardware.GetEwcTable();
-  options.audit = &hardware.GetAuditCollector();
-  options.region_base_va = base;
-  options.code_memory = code_memory.data();
-  options.code_memory_size = code_memory.size();
+  options.hardware = &hardware;
   const sim::core::ExecResult result = sim::core::ExecuteProgram(base, options);
 
   SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
