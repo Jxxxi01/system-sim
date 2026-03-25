@@ -148,3 +148,12 @@ target_link_libraries(demo_cross_user
   PRIVATE
     simulator_core
 )
+
+add_executable(demo_injection
+  demos/injection/demo_injection.cpp
+)
+
+target_link_libraries(demo_injection
+  PRIVATE
+    simulator_core
+)
