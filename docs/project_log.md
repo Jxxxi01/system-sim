@@ -1434,9 +1434,9 @@
 - 当前所有测试 pages 字段为 "[]"，新增 PVT 注册逻辑不影响现有测试路径。
 
 ### 实现复盘
-**状态：** 已实现（未推送）
-**提交：** TBD
-**远端：** 未推送
+**状态：** 已实现
+**提交：** 926b26d
+**远端：** origin/issue-7-pvt（2026-03-25 推送）
 
 #### 改动摘要（diff 风格）
 - `include/security/pvt.hpp (new) | 新增 PvtTable / PvtEntry / PageAllocator 接口与 PVT 相关枚举、结果结构`
