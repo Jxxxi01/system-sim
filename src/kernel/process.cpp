@@ -12,6 +12,16 @@
 namespace sim::kernel {
 namespace {
 
+struct ProcessPageSpec {
+  std::uint64_t va = 0;
+  sim::security::PvtPageType page_type = sim::security::PvtPageType::DATA;
+};
+
+struct ProcessLoadSpec {
+  ProcessContext process;
+  std::vector<ProcessPageSpec> pages;
+};
+
 struct JsonValue {
   enum class Kind {
     OBJECT,
@@ -270,14 +280,57 @@ std::uint64_t RequireU64Field(const JsonValue::Object& object, const char* name)
   return RequireNumber(RequireField(object, name), name);
 }
 
-ProcessContext ParseProcessContextHeader(const std::string& secureir_json) {
+const JsonValue::Array& RequireArray(const JsonValue& value, const char* name) {
+  if (value.kind != JsonValue::Kind::ARRAY) {
+    std::ostringstream oss;
+    oss << "kernel_process_invalid_field field=" << name << " expected=array";
+    throw std::runtime_error(oss.str());
+  }
+  return value.array_value;
+}
+
+std::string RequireStringField(const JsonValue::Object& object, const char* name) {
+  const JsonValue& value = RequireField(object, name);
+  if (value.kind != JsonValue::Kind::STRING) {
+    std::ostringstream oss;
+    oss << "kernel_process_invalid_field field=" << name << " expected=string";
+    throw std::runtime_error(oss.str());
+  }
+  return value.string_value;
+}
+
+sim::security::PvtPageType ParsePageType(const std::string& value) {
+  if (value == "CODE") {
+    return sim::security::PvtPageType::CODE;
+  }
+  if (value == "DATA") {
+    return sim::security::PvtPageType::DATA;
+  }
+
+  std::ostringstream oss;
+  oss << "kernel_process_invalid_page_type type=" << value;
+  throw std::runtime_error(oss.str());
+}
+
+ProcessLoadSpec ParseProcessLoadSpec(const std::string& secureir_json) {
   const JsonValue root = JsonParser(secureir_json).Parse();
   const JsonValue::Object& object = RequireObject(root, "root");
 
-  ProcessContext process;
-  process.user_id = RequireU32Field(object, "user_id");
-  process.base_va = RequireU64Field(object, "base_va");
-  return process;
+  ProcessLoadSpec spec;
+  spec.process.user_id = RequireU32Field(object, "user_id");
+  spec.process.base_va = RequireU64Field(object, "base_va");
+
+  const JsonValue::Array& pages = RequireArray(RequireField(object, "pages"), "pages");
+  spec.pages.reserve(pages.size());
+  for (const JsonValue& page_value : pages) {
+    const JsonValue::Object& page_object = RequireObject(page_value, "pages[]");
+    ProcessPageSpec page;
+    page.va = RequireU64Field(page_object, "va");
+    page.page_type = ParsePageType(RequireStringField(page_object, "page_type"));
+    spec.pages.push_back(page);
+  }
+
+  return spec;
 }
 
 std::string MakeContextSwitchDetail(const ProcessContext& process) {
@@ -294,14 +347,26 @@ KernelProcessTable::KernelProcessTable(sim::security::Gateway& gateway, sim::sec
 
 sim::security::ContextHandle KernelProcessTable::LoadProcess(const std::string& secureir_json,
                                                              std::vector<std::uint8_t> code_memory) {
-  ProcessContext process = ParseProcessContextHeader(secureir_json);
+  ProcessLoadSpec load_spec = ParseProcessLoadSpec(secureir_json);
+  ProcessContext& process = load_spec.process;
   bool gateway_loaded = false;
+  std::vector<std::uint64_t> registered_page_ids;
 
   try {
     process.context_handle = gateway_.Load(secureir_json);
     gateway_loaded = true;
 
     hardware_.StoreCodeRegion(process.context_handle, process.base_va, std::move(code_memory));
+
+    for (const ProcessPageSpec& page : load_spec.pages) {
+      const sim::security::PvtRegisterResult register_result =
+          hardware_.GetPvtTable().RegisterPage(process.context_handle, page.va, page.page_type);
+      if (!register_result.ok) {
+        throw std::runtime_error(register_result.error);
+      }
+      registered_page_ids.push_back(register_result.pa_page_id);
+    }
+    process.pvt_page_ids = registered_page_ids;
 
     const auto inserted = processes_.emplace(process.context_handle, process);
     if (!inserted.second) {
@@ -312,6 +377,9 @@ sim::security::ContextHandle KernelProcessTable::LoadProcess(const std::string& 
 
     return process.context_handle;
   } catch (...) {
+    for (std::uint64_t pa_page_id : registered_page_ids) {
+      hardware_.GetPvtTable().RemovePage(pa_page_id);
+    }
     if (process.context_handle != 0) {
       hardware_.RemoveCodeRegion(process.context_handle);
       processes_.erase(process.context_handle);
@@ -328,6 +396,12 @@ sim::security::ContextHandle KernelProcessTable::LoadProcess(const std::string& 
 
 void KernelProcessTable::ReleaseProcess(sim::security::ContextHandle handle) {
   const bool was_active = active_handle_.has_value() && *active_handle_ == handle;
+  const ProcessContext* process = GetProcess(handle);
+  if (process != nullptr) {
+    for (std::uint64_t pa_page_id : process->pvt_page_ids) {
+      hardware_.GetPvtTable().RemovePage(pa_page_id);
+    }
+  }
   gateway_.Release(handle);
   hardware_.RemoveCodeRegion(handle);
   processes_.erase(handle);

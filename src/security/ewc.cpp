@@ -53,6 +53,7 @@ EwcQueryResult EwcTable::Query(std::uint64_t pc, ContextHandle context_handle) c
       result.key_id = window.key_id;
       result.window_id = window.window_id;
       result.owner_user_id = window.owner_user_id;
+      result.permissions = window.permissions;
       result.code_policy_id = window.code_policy_id;
       return result;
     }

@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "security/pvt.hpp"
 #include "security/audit.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
@@ -16,6 +17,7 @@ struct ProcessContext {
   sim::security::ContextHandle context_handle = 0;
   std::uint32_t user_id = 0;
   std::uint64_t base_va = 0;
+  std::vector<std::uint64_t> pvt_page_ids;
 };
 
 class KernelProcessTable {

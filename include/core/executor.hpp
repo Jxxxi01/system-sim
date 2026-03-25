@@ -21,7 +21,8 @@ enum class TrapReason {
   UNKNOWN_OPCODE,
   STEP_LIMIT,
   EWC_ILLEGAL_PC,
-  DECRYPT_DECODE_FAIL
+  DECRYPT_DECODE_FAIL,
+  PVT_MISMATCH
 };
 
 struct Trap {

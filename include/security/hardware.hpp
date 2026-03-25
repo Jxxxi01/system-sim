@@ -10,6 +10,7 @@
 
 #include "security/audit.hpp"
 #include "security/ewc.hpp"
+#include "security/pvt.hpp"
 
 namespace sim::security {
 
@@ -20,8 +21,13 @@ struct CodeRegion {
 
 class SecurityHardware {
  public:
+  SecurityHardware();
+
   EwcTable& GetEwcTable();
   const EwcTable& GetEwcTable() const;
+
+  PvtTable& GetPvtTable();
+  const PvtTable& GetPvtTable() const;
 
   AuditCollector& GetAuditCollector();
   const AuditCollector& GetAuditCollector() const;
@@ -37,13 +43,20 @@ class SecurityHardware {
  private:
   EwcTable ewc_table_;
   AuditCollector audit_collector_;
+  PvtTable pvt_table_;
   std::unordered_map<ContextHandle, CodeRegion> code_regions_;
   std::optional<ContextHandle> active_handle_;
 };
 
+inline SecurityHardware::SecurityHardware() : pvt_table_(ewc_table_, audit_collector_) {}
+
 inline EwcTable& SecurityHardware::GetEwcTable() { return ewc_table_; }
 
 inline const EwcTable& SecurityHardware::GetEwcTable() const { return ewc_table_; }
+
+inline PvtTable& SecurityHardware::GetPvtTable() { return pvt_table_; }
+
+inline const PvtTable& SecurityHardware::GetPvtTable() const { return pvt_table_; }
 
 inline AuditCollector& SecurityHardware::GetAuditCollector() { return audit_collector_; }
 

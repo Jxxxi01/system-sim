@@ -505,6 +505,8 @@ const char* TrapReasonToString(TrapReason reason) {
       return "EWC_ILLEGAL_PC";
     case TrapReason::DECRYPT_DECODE_FAIL:
       return "DECRYPT_DECODE_FAIL";
+    case TrapReason::PVT_MISMATCH:
+      return "PVT_MISMATCH";
   }
   return "UNKNOWN_OPCODE";
 }

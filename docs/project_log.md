@@ -1315,3 +1315,185 @@
 **推送状态：** 已推送
 **提交：** 5b9d299
 **远端：** origin/issue-6c-cross-user-demo（2026-03-24 推送）
+
+## Issue 7：PVT 模拟器 + secure_page_load（方案确认）
+**日期：** 2026-03-25
+**分支：** issue-7-pvt
+**状态：** 方案已确认
+
+### 初始需求（用户提出）
+- 实现 PVT（Physical page Verification Table）模拟器，OS 通过 `secure_page_load` 注册安全页面时，硬件侧 PVT 从 EWC 读取执行窗信息做反向校验。
+- 确保 OS 不能伪造页面归属/映射。
+
+### 额外补充/优化需求（对话新增）
+- `RegisterPage` 签名为 `RegisterPage(handle, va, page_type)`，**不含 owner_user_id 参数**。PVT 内部从 EWC 查询 owner（模拟硬件互联，方式 X），与 system_design_v4 流程图 10.1 一致：OS 提供 PA + 密文 + MAC，PVT 自己从 EWC 读 owner。
+- EWC 的 `ExecWindow` / `EwcQueryResult` 新增 `permissions` 字段（方案 a），支持 page_type 与 permissions 双重校验，与 v4 §3.4 和 §9.4 一致。
+- 物理页分配器预留接口，当前实现从 VA 派生（`va / PAGE_SIZE`），利用当前模型"地址空间互不重叠"简化项。
+- 不做独立 demo，仅单测覆盖，demo 留到 Issue 9。
+
+### Coding 前最终方案
+#### 文件与模块清单
+- 新增：
+  - `include/security/pvt.hpp`（PvtTable 类 + PvtEntry 结构体）
+  - `src/security/pvt.cpp`（RegisterPage / RemovePage / LookupPage 实现）
+  - `tests/test_pvt.cpp`（PVT 单元测试）
+- 修改：
+  - `include/security/ewc.hpp`（ExecWindow 新增 permissions 字段，EwcQueryResult 新增 permissions 字段）
+  - `src/security/gateway.cpp`（Gateway 写入窗口时赋值 permissions）
+  - `include/security/hardware.hpp`（SecurityHardware 集成 PvtTable 成员 + GetPvtTable 访问器）
+  - `include/core/executor.hpp`（TrapReason 新增 PVT_MISMATCH）
+  - `src/core/executor.cpp`（TrapReasonToString 新增 PVT_MISMATCH 分支）
+  - `src/kernel/process.cpp`（LoadProcess 解析 SecureIR pages 字段，调用 PVT 注册）
+  - `CMakeLists.txt`（新增 pvt.cpp 到 simulator_core，新增 test_pvt）
+
+#### 语义接口（WHAT，签名由 Codex 决定）
+- **PvtEntry 结构体**：
+  - `pa_page_id`：物理页号（当前 = va / PAGE_SIZE）
+  - `owner_user_id`：归属用户（PVT 从 EWC 读取）
+  - `expected_va`：该 PA 应被映射到的 VA
+  - `permissions`：RX / RW / RO
+  - `page_type`：CODE / DATA
+  - `state`：FREE / ALLOCATED
+- **PvtTable**：
+  - 构造时接收 `const EwcTable&` 引用（模拟片上硬件互联）
+  - `RegisterPage(handle, va, page_type)`：
+    1. 通过内部 PageAllocator 获取 pa_page_id（当前 = va / PAGE_SIZE）
+    2. 若 page_type == CODE：调用 `ewc_.Query(va, handle)`，检查 `matched_window == true`，从结果读取 `owner_user_id` 和 `permissions`
+    3. page_type 与 permissions 双重校验：CODE → 必须 RX，DATA → RW 或 RO
+    4. 校验通过 → 写入 PvtEntry，返回成功
+    5. 校验失败 → 返回错误 + audit PVT_MISMATCH
+  - `RemovePage(pa_page_id)`：移除条目
+  - `LookupPage(pa_page_id)`：查询条目
+- **ExecWindow / EwcQueryResult 扩展**：
+  - 新增 `permissions` 字段（枚举或整数）
+  - Gateway 写入窗口时赋值（当前 CODE 窗口 → RX）
+- **SecurityHardware 集成**：
+  - 新增 `PvtTable pvt_table_` 成员，声明在 `ewc_table_` 之后，构造时传入 `ewc_table_` 引用
+  - 新增 `GetPvtTable()` / `const GetPvtTable()` 访问器
+- **KernelProcessTable::LoadProcess() 集成**：
+  - Gateway 配置 EWC 窗口后，解析 SecureIR 的 pages 字段
+  - 逐页调用 `hardware_.GetPvtTable().RegisterPage(handle, va, page_type)`
+  - 注册失败 → 回滚（Release handle）+ 抛异常
+- **PageAllocator 接口**：
+  - 预留 PageAllocator 概念（函数或简单类），当前实现 `va / PAGE_SIZE`
+  - 未来可替换为真实物理页分配器
+
+#### 语义/不变量（必须测死，后续不得漂移）
+- CODE 页注册时，VA 必须在 handle 的 EWC 窗口内；否则 PVT_MISMATCH。
+- CODE 页注册时，PVT 条目的 owner_user_id 来自 EWC 窗口（非 OS 提供）。
+- page_type 与 permissions 不一致 → 注册拒绝。
+- 注册成功后 LookupPage 返回正确的 PvtEntry。
+- RemovePage 后 LookupPage 返回空。
+- EWC 的 ExecWindow 新增 permissions 字段不破坏现有测试（当前所有窗口为 CODE/RX）。
+- TrapReason::PVT_MISMATCH 新增不破坏现有 TrapReasonToString。
+- LoadProcess 在 pages 不为空时执行 PVT 注册；现有 pages=[] 的测试继续通过。
+
+#### 测试计划（测试名 + 核心断言点）
+- `RegisterPage_CodePage_ValidWindow_Succeeds`：CODE 页 VA 在 EWC 窗口内 → 注册成功，LookupPage 返回正确条目。
+- `RegisterPage_CodePage_OwnerFromEwc`：注册成功后条目的 owner_user_id 等于 EWC 窗口的 owner，非外部提供。
+- `RegisterPage_CodePage_NoWindow_Fails`：CODE 页 VA 不在任何 EWC 窗口内 → PVT_MISMATCH。
+- `RegisterPage_CodePage_OwnerMismatch_Fails`：VA 在窗口内但 handle 对应的 EWC 窗口 owner 与预期不符 → PVT_MISMATCH（跨用户重映射攻击）。
+- `RegisterPage_PageTypePermissionMismatch_Fails`：page_type 与 permissions 不一致 → 拒绝。
+- `RemovePage_Succeeds`：注册后移除 → LookupPage 返回空。
+- `LoadProcess_WithPages_RegistersPvt`：LoadProcess 带 pages 字段 → PVT 条目已注册。
+
+#### 验收命令（仅列出，将由用户批准后执行）
+- `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+- `cmake --build build`
+- `ctest --test-dir build`
+
+#### 设计决策记录
+
+**D-1：PVT 从 EWC 读取 owner（方式 X，硬件互联）**
+- 决策：`RegisterPage` 不接受 OS 提供的 owner_user_id，PVT 内部通过 `ewc_.Query()` 获取。
+- 原因：与 system_design_v4 §9.4 和流程图 10.1 一致。OS 是 untrusted，owner 必须从可信源（EWC，由 Gateway 从签名 SecureIR 配置）获取。
+
+**D-2：EWC 新增 permissions 字段**
+- 决策：ExecWindow 和 EwcQueryResult 新增 permissions 字段，Gateway 写入时赋值。
+- 原因：v4 §9.4 明确写 "PVT 从 EWC 读取 VA 范围、owner、permissions"，双重校验需要 permissions 数据。
+
+**D-3：PageAllocator 接口预留**
+- 决策：定义 PageAllocator 接口，当前实现 va / PAGE_SIZE（利用地址空间不重叠简化项）。
+- 原因：当前 1:1 VA=PA 模型下 VA 天然唯一；接口预留给未来非简化模型。
+
+**D-4：SecureIR 明文/加密分区**
+- 决策：pages 布局信息（va, size, page_type, permissions）属于 SecureIR 明文区域，OS 可读。
+- 原因：v4 §5.1 明确定义布局元数据明文（OS 需要用于内存分配和页表配置），内容和策略加密。安全性不依赖布局保密，依赖签名完整性 + PVT 对 EWC 的反向校验。
+
+**D-5：secure_page_load 语义嵌入 LoadProcess**
+- 决策：不新增独立 secure_page_load 方法，语义内嵌在 KernelProcessTable::LoadProcess() 流程中。
+- 原因：当前 kernel 层实现为 KernelProcessTable（非 KernelEmulator），LoadProcess 已是程序加载的统一入口。secure_page_load 作为加载流程的一个步骤自然嵌入。
+
+#### Codex 可行性检查结果摘要
+- PvtTable 构造时接收 const EwcTable& 引用，SecurityHardware 内初始化顺序兼容（ewc_table_ 先于 pvt_table_ 声明）。
+- EwcTable::Query(va, handle) 已返回 owner_user_id，PVT 可直接使用，不需新增 EWC 接口。
+- TrapReason 枚举可安全追加 PVT_MISMATCH，需同步 TrapReasonToString()。
+- LoadProcess 中 Gateway.Load() 之后有明确插入点（当前第 301 行之后），回滚逻辑可覆盖新增失败路径。
+- 当前 Gateway 解析 pages 但丢弃内容；LoadProcess 需独立解析 pages 字段。
+- CMakeLists.txt 无冲突，直接追加 pvt.cpp 和 test_pvt。
+- 当前所有测试 pages 字段为 "[]"，新增 PVT 注册逻辑不影响现有测试路径。
+
+### 实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 改动摘要（diff 风格）
+- `include/security/pvt.hpp (new) | 新增 PvtTable / PvtEntry / PageAllocator 接口与 PVT 相关枚举、结果结构`
+- `src/security/pvt.cpp (new) | 实现 PVT 注册、移除、查询、permissions 校验与默认 IdentityMappedPageAllocator`
+- `tests/test_pvt.cpp (new) | 新增 PVT 单元测试，覆盖 owner 来源、权限匹配、缺窗拒绝与 owner mismatch`
+- `include/security/ewc.hpp | 新增 MemoryPermissions 枚举与 EWC 查询/窗口 permissions 字段`
+- `src/security/ewc.cpp | Query 返回 permissions，支撑 PVT 从 EWC 读取 owner + permissions`
+- `src/security/gateway.cpp | Gateway 配置 CODE 窗口时写入 RX permissions`
+- `include/security/hardware.hpp | SecurityHardware 集成 PvtTable 成员、构造初始化与 GetPvtTable 访问器`
+- `include/core/executor.hpp | TrapReason 新增 PVT_MISMATCH`
+- `src/core/executor.cpp | TrapReasonToString 新增 PVT_MISMATCH 分支`
+- `include/kernel/process.hpp | ProcessContext 新增 pvt_page_ids，支撑 load 失败回滚与 release 清理`
+- `src/kernel/process.cpp | LoadProcess 解析 pages、调用 PVT 注册，并在失败路径回滚 PVT / handle 状态`
+- `CMakeLists.txt | 接入 pvt.cpp，新增 test_pvt 并纳入 ctest`
+
+#### 关键文件逐条复盘
+- `include/security/pvt.hpp`：定义 `PvtPageType`、`PvtEntryState`、`PvtEntry`、`PvtRegisterResult`、`PageAllocator` 和 `PvtTable` 接口；构造函数显式接收 `const EwcTable&`，落实“PVT 从可信 EWC 读取 owner”的硬件互联语义。
+- `src/security/pvt.cpp`：实现 `RegisterPage(handle, va, page_type)` 主路径；内部先通过 `PageAllocator` 生成 `pa_page_id`，再查询 `ewc_.Query()` 获取 owner 和 permissions，执行 `page_type` 与 permissions 双重校验（`CODE -> RX`，`DATA -> RW/RO`），失败时 audit `PVT_MISMATCH` 并返回错误；同时提供默认 `IdentityMappedPageAllocator`（`va / kPageSize`）。
+- `tests/test_pvt.cpp`：新增 PVT 专项测试，覆盖成功注册、owner 来自 EWC、无窗口拒绝、owner mismatch 攻击拒绝、page_type 与 permissions 不一致拒绝、移除后查空等核心不变量。
+- `include/security/ewc.hpp`：为 `ExecWindow` 与 `EwcQueryResult` 增加 `permissions` 字段，并新增 `MemoryPermissions` 枚举，给 PVT 双重校验提供统一数据模型。
+- `src/security/ewc.cpp`：更新 EWC 查询返回值，使 `Query()` 在命中窗口时一并返回 permissions，保证 PVT 不需要额外 owner/permission 输入参数。
+- `src/security/gateway.cpp`：Gateway 在加载 CODE 执行窗时写入 `RX` permissions，使现有执行窗配置与 PVT 语义一致，并保持 demo / 旧测试兼容。
+- `include/security/hardware.hpp`：在 `SecurityHardware` 中加入 `PvtTable pvt_table_`，构造时绑定已有 `ewc_table_` 与 `audit_collector_`，同时暴露 `GetPvtTable()` 访问器供 kernel 加载路径调用。
+- `include/core/executor.hpp`：扩展 `TrapReason`，增加 `PVT_MISMATCH` 枚举值，为 secure page load 失败提供统一 trap reason 编码。
+- `src/core/executor.cpp`：补齐 `TrapReasonToString()` 的 `PVT_MISMATCH` 分支，避免字符串化遗漏。
+- `include/kernel/process.hpp`：在 `ProcessContext` 中加入 `pvt_page_ids`，记录当前进程已注册的 PVT 页，便于失败回滚和后续释放。
+- `src/kernel/process.cpp`：在 `LoadProcess()` 中解析 SecureIR `pages` 字段，按页调用 `hardware_.GetPvtTable().RegisterPage()`；若中途失败，回滚已注册页面并释放 handle，避免 PVT / process table 残留脏状态。
+- `CMakeLists.txt`：把 `src/security/pvt.cpp` 接入 `simulator_core`，新增 `test_pvt` target 并注册到 `ctest`，使新功能进入标准构建与测试路径。
+
+#### 行为变化总结
+- 新增能力：
+  - 新增 PVT 模拟器，OS 在 secure page load 路径中只能提交 `handle + va + page_type`，owner 由 PVT 内部从 EWC 读取，不能伪造。
+  - 新增 `PageAllocator` 抽象，当前默认 `IdentityMappedPageAllocator` 采用 `va / kPageSize`，为后续真实物理页分配模型预留替换点。
+  - `LoadProcess()` 现在会消费 SecureIR 的 `pages` 字段并注册 PVT 条目，形成 Gateway/EWC 到 PVT 的闭环校验链路。
+  - EWC 现在显式携带 permissions，PVT 可执行 `page_type` 与 permissions 双重检查，而不仅仅判断窗口是否存在。
+- 失败模式/Trap：
+  - `RegisterPage()` 若查询不到匹配 EWC 窗口，会拒绝注册并记录 `PVT_MISMATCH` 审计事件。
+  - `page_type` 与 permissions 不一致时会拒绝注册；当前规则为 `CODE -> RX`，`DATA -> RW/RO`。
+  - 跨用户 owner mismatch 或错误 handle 导致的窗口不匹配会被 PVT 拒绝，不能通过伪造映射绕过。
+  - `LoadProcess()` 若任一页注册失败，会回滚已注册 PVT 页面并释放对应 handle，不留下半完成状态。
+  - `demo_normal` 路径保持向后兼容，本次未引入行为回归。
+
+#### 测试与运行
+- 建议/已执行命令：
+  - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+  - `cmake --build build`
+  - `ctest --test-dir build`
+- 已通过测试：
+  - `ctest`：6/6 通过
+  - 全部测试用例：60 个 test cases 全绿
+  - `test_pvt`：新增 PVT 覆盖全部通过
+  - `demo_normal`：保持可运行，向后兼容未回归
+  - 评审回合：
+    - Round 1：2 项失败，问题为缺少 `PageAllocator` 抽象、缺少 owner-mismatch 测试
+    - Round 1 修复：补充 `PageAllocator` 接口与默认实现，并新增 owner-mismatch 测试
+    - Round 2：全部通过，60 个 test cases 绿灯
+
+#### 已知限制 & 下一步建议
+- 当前默认物理页分配仍采用 `IdentityMappedPageAllocator`（`va / kPageSize`），依赖“地址空间互不重叠”的原型前提；若后续引入真实物理页管理，需要替换 allocator 实现并补充冲突测试。
+- 目前 PVT 集成在 `LoadProcess()` 的 secure page load 路径中，尚未扩展为独立 demo；按既定计划，演示路径留到后续 Issue 9。

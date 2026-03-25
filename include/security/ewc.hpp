@@ -8,6 +8,13 @@
 
 namespace sim::security {
 
+enum class MemoryPermissions {
+  NONE,
+  RX,
+  RW,
+  RO
+};
+
 enum class ExecWindowType {
   CODE
 };
@@ -19,6 +26,7 @@ struct ExecWindow {
   std::uint32_t owner_user_id = 0;
   std::uint32_t key_id = 0;
   ExecWindowType type = ExecWindowType::CODE;
+  MemoryPermissions permissions = MemoryPermissions::NONE;
   std::uint32_t code_policy_id = 0;
 };
 
@@ -28,6 +36,7 @@ struct EwcQueryResult {
   std::uint32_t key_id = 0;
   std::uint32_t window_id = 0;
   std::uint32_t owner_user_id = 0;
+  MemoryPermissions permissions = MemoryPermissions::NONE;
   std::uint32_t code_policy_id = 0;
 };
 

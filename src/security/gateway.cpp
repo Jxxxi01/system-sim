@@ -411,6 +411,7 @@ ContextHandle Gateway::Load(const std::string& json) {
       window.owner_user_id = secure_ir.user_id;
       window.key_id = ir_window.key_id;
       window.type = ExecWindowType::CODE;
+      window.permissions = MemoryPermissions::RX;
       window.code_policy_id = ir_window.code_policy_id;
       windows.push_back(window);
     }
