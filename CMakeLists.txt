@@ -157,3 +157,12 @@ target_link_libraries(demo_injection
   PRIVATE
     simulator_core
 )
+
+add_executable(demo_rop
+  demos/rop/demo_rop.cpp
+)
+
+target_link_libraries(demo_rop
+  PRIVATE
+    simulator_core
+)
