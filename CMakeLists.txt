@@ -38,6 +38,7 @@ add_library(simulator_core STATIC
   src/kernel/process.cpp
   src/isa/scaffold.cpp
   src/security/code_codec.cpp
+  src/security/securir_builder.cpp
   src/security/audit.cpp
   src/security/ewc.cpp
   src/security/gateway.cpp
@@ -129,6 +130,17 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME spe COMMAND test_spe)
+
+  add_executable(test_securir_builder
+    tests/test_securir_builder.cpp
+  )
+
+  target_link_libraries(test_securir_builder
+    PRIVATE
+      simulator_core
+  )
+
+  add_test(NAME securir_builder COMMAND test_securir_builder)
 endif()
 
 add_executable(demo_normal

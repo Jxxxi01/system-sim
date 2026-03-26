@@ -1909,4 +1909,124 @@ Issue 11 分 A/B 两阶段：
 ### Push 状态
 **已推送：** 2026-03-26
 **分支：** issue-11-secureir-gen
+
+---
+
+## Issue 11B：SecureIrBuilder + Demo 重构
+**日期：** 2026-03-26
+**分支：** issue-11-secureir-gen
+**状态：** Phase A 方案已确认
+
+### Phase A：计划冻结
+
+#### 目标
+提供 SecureIrBuilder 库函数，从 AsmProgram + 安全配置一站式生成 SecureIrPackage（含加密），消除 5 个 demo 中重复的 MakeSecureIrJson + 手动 EncryptProgram/BuildCodeMemory 样板代码。
+
+#### 文件范围
+- 新增 `include/security/securir_builder.hpp`：Builder 公开接口
+- 新增 `src/security/securir_builder.cpp`：Builder 实现
+- 新增 `tests/test_securir_builder.cpp`：Builder 单元测试 + round-trip 验证
+- 修改 `CMakeLists.txt`：添加新源文件到 simulator_core 库 + 新测试目标
+- 修改 `demos/normal/demo_normal.cpp`：删除 MakeSecureIrJson，改用 builder
+- 修改 `demos/injection/demo_injection.cpp`：同上
+- 修改 `demos/cross_user/demo_cross_user.cpp`：同上
+- 修改 `demos/rop/demo_rop.cpp`：同上
+- 修改 `demos/cross_process/demo_cross_process.cpp`：同上
+
+#### 语义接口
+
+**SecureIrBuilder 模块**（namespace `sim::security`）：
+- 输入：`sim::isa::AsmProgram` + 安全配置参数
+- 配置维度：program_name, user_id, key_id, window_id, signature（默认 "stub-valid"）, cfi_level（默认 0）, call_targets（默认空）, jmp_targets（默认空）, pages（默认空）
+- 内部流程：调用 EncryptProgram → BuildCodeMemory 生成 code_memory；生成符合 Gateway parser 要求的 metadata JSON 字符串
+- 输出：`SecureIrPackage{metadata, code_memory}`
+- base_va 和 end_va 从 AsmProgram 自动推导
+- 默认便捷路径：自动生成单窗口（覆盖当前全部 demo 场景）
+- 多窗口接口：允许调用者手动指定多个窗口描述，此时不自动推导窗口
+
+**不变量**：
+- Builder 生成的 SecureIrPackage 必须能被 Gateway::Load 正常解析，语义等价于当前手写的 MakeSecureIrJson + EncryptProgram + BuildCodeMemory 路径
+- JSON 字段全部输出（pages, cfi_level, call_targets, jmp_targets 即使为默认值也必须输出——Gateway parser 全必填）
+- 数字以十进制输出（不能用 0x 前缀）
+- Builder 是纯工具链侧组件，不涉及硬件模拟状态
+
+**Demo 重构**：
+- 删除每个 demo 中的 MakeSecureIrJson 函数及其辅助函数（NumberArrayJson, PagesJson 等）
+- 删除每个 demo 中的手动 EncryptProgram + BuildCodeMemory 调用
+- 改用 builder 一步生成 SecureIrPackage，直接传入 LoadProcess
+- 攻击场景的后续操作不变：demo_injection 的 XorWholeCiphertext/XorPayloadBytes、demo_cross_process Case C 的 StoreCodeRegion 保留
+
+#### 测试目标
+1. 基础生成：简单 AsmProgram + 基本配置 → Build → Gateway::Load 成功 → GatewayLoadResult 各字段正确
+2. CFI 字段传递：设置 cfi_level + call/jmp targets → 验证 Gateway Load 后 SPE 配置正确
+3. Pages 字段传递：添加 page specs → 验证 Gateway Load 后 pages 布局正确
+4. Round-trip 验证：Builder → Load → Executor 执行 → HALT，端到端正确
+5. 多窗口路径：手动指定 2 个不重叠窗口 → Gateway Load 成功
+6. Demo 等价性：5 个 demo 重构后 ctest 全绿 + demo 输出行为不变
+
+#### 设计决策记录
+
+**D-1：API 风格交由 Codex 选择**
+- 决策：不限定 builder pattern 或 config struct + 自由函数，由 Codex 在实现阶段自行选择。
+- 原因：两种风格功能等价，属于 HOW 层面的实现细节。
+
+**D-2：多窗口接口保留，单 key 加密**
+- 决策：Builder 接口支持多窗口描述（metadata 的 windows 数组可含多条目），但当前实现只做单 key 加密（所有窗口共享 AsmProgram 级别的 key_id）。
+- 原因：多 key 分段加密需改造 EncryptProgram，超出本 Issue 范围。接口不受限，实现保持简单。
+
+**D-3：Builder 不处理攻击构造**
+- 决策：Builder 只负责正常的 SecureIrPackage 生成。攻击场景（密文篡改、恶意 code_region 注入）在 LoadProcess 之后由各 demo 自行处理。
+- 原因：攻击操作作用于已加载到硬件的数据，与 package 构建阶段无关。
 **提交：** issue 11A: SecureIrPackage + unified loading chain
+
+### Phase B：实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 1. 变更文件清单
+- 新增 `include/security/securir_builder.hpp`：定义 `SecureIrBuilderConfig`、`SecureIrWindowSpec`、`SecureIrPageSpec` 和 `SecureIrBuilder::Build` 静态入口。
+- 新增 `src/security/securir_builder.cpp`：实现 `ResolveWindows`（单窗口自动推导 / 多窗口显式配置）、`key_id` 一致性校验、`EncryptProgram` + `BuildCodeMemory` 封装以及 metadata JSON 生成。
+- 新增 `tests/test_securir_builder.cpp`：新增 7 个 Builder 测试，覆盖基础构建、CFI 字段、`pages` 字段、单/多窗口 round-trip 和异常路径。
+- 修改 `CMakeLists.txt`：将 `src/security/securir_builder.cpp` 加入 `simulator_core`，新增 `test_securir_builder` 测试目标。
+- 修改 `demos/normal/demo_normal.cpp`：删除手写 `MakeSecureIrJson`；改用 builder；`CASE_B` 改为构造正确包与错误 key 包后交换 `code_memory` 模拟 wrong-key。
+- 修改 `demos/injection/demo_injection.cpp`：删除手写 JSON 构造，统一改用 builder；保留 `XorWholeCiphertext` / `XorPayloadBytes` 攻击辅助逻辑。
+- 修改 `demos/cross_user/demo_cross_user.cpp`：删除手写 JSON 构造，统一改用 builder。
+- 修改 `demos/rop/demo_rop.cpp`：删除 `MakeSecureIrJson` / `NumberArrayJson`，改由 builder 配置 `cfi_level`、`call_targets`、`jmp_targets`。
+- 修改 `demos/cross_process/demo_cross_process.cpp`：删除 `MakeSecureIrJson` / `PagesJson` / 本地 `SecureIrPageSpec`，改由 builder 配置 `pages`。
+
+#### 2. 关键实现细节
+- Builder API 采用 `SecureIrBuilderConfig` + `SecureIrBuilder::Build` 静态方法风格，符合 Phase A 中对 API 风格开放、由实现阶段落地的决策。
+- 单窗口便捷路径已落地：当 `config.windows` 为空时，Builder 会根据 `AsmProgram` 的 `base_va` 和指令长度自动推导单个执行窗口，覆盖当前普通 demo 场景。
+- 多窗口路径使用调用方传入的 `SecureIrWindowSpec` 列表；实现中强制校验所有窗口 `key_id` 一致，否则抛出 `securir_builder_inconsistent_window_key_ids`；加密时使用窗口上的 `key_id`，不再沿用 `config.key_id`。
+- metadata JSON 由 `std::ostringstream` 直接生成，所有数值统一按十进制输出；字符串字段对引号和反斜杠做显式转义，确保兼容 Gateway 现有 parser。
+- `demo_normal` 的 `CASE_B` 为保留 wrong-key 语义，改为分别生成 `key=11` 的正确包和 `key=99` 的错误包，再交换 `code_memory` 制造 metadata / 密文不匹配；这样既保留演示效果，也不破坏 builder 对一致性的强约束。
+
+#### 3. 测试覆盖与运行结果
+- 新增 `tests/test_securir_builder.cpp` 7 个测试：
+  - 基础构建成功
+  - CFI 字段透传
+  - `pages` 字段透传
+  - 单窗口 round-trip 执行
+  - 多窗口加载成功
+  - 不一致 `key_id` 抛异常
+  - 多窗口 round-trip 执行
+- 全量测试结果：8 个 test suites 全绿，总计约 70 个 test cases 通过。
+- demo 验证结果：5 个 demo 全部通过，且 trap reason 输出与预期一致。
+- 已执行命令：
+  - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+  - `cmake --build build`
+  - `ctest --test-dir build`
+
+#### 4. 与 Phase A 方案的偏差
+- 实施过程中评审发现一个多窗口 `key_id` 语义缺口：初版实现即使走多窗口路径，仍使用 `config.key_id` 做加密，和 D-2“单 key 加密但由窗口语义约束”不完全一致。该问题已修正为“使用窗口 `key_id` 加密 + 全窗口一致性校验”，最终语义与 Phase A 对齐。
+- `demo_normal` 的 wrong-key 演示实现方式与 Phase A 的抽象描述不同：由于 builder 现在显式阻止 metadata / key 配置不一致，最终采用交换 `code_memory` 的方式保留 `CASE_B`。这是实现层面的演示手法调整，不改变外部可观察行为。
+
+#### 5. 已知限制 & 下一步建议
+- 当前多窗口能力仍限定为“所有窗口共享同一 `key_id`”；多 key 分段加密依然不在本 Issue 范围内。
+- metadata JSON 仍是手工串接输出，字段集继续扩展时需要同步补齐转义和测试覆盖。
+
+### Push 状态
+- 分支：`issue-11-secureir-gen`
+- 未推送
+- 日期：2026-03-26

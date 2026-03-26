@@ -9,52 +9,11 @@
 #include "isa/assembler.hpp"
 #include "kernel/process.hpp"
 #include "security/audit.hpp"
-#include "security/code_codec.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
-#include "security/securir_package.hpp"
+#include "security/securir_builder.hpp"
 
 namespace {
-
-std::string NumberArrayJson(const std::vector<std::uint64_t>& values) {
-  std::ostringstream oss;
-  oss << '[';
-  for (std::size_t i = 0; i < values.size(); ++i) {
-    if (i != 0) {
-      oss << ',';
-    }
-    oss << values[i];
-  }
-  oss << ']';
-  return oss.str();
-}
-
-std::string MakeSecureIrJson(const std::string& program_name, std::uint32_t user_id, std::uint64_t base_va,
-                             std::uint64_t end_va, std::uint32_t key_id, std::uint32_t window_id,
-                             const std::string& signature, std::uint32_t cfi_level,
-                             const std::vector<std::uint64_t>& call_targets,
-                             const std::vector<std::uint64_t>& jmp_targets) {
-  std::ostringstream oss;
-  oss << "{"
-      << "\"program_name\":\"" << program_name << "\","
-      << "\"user_id\":" << user_id << ","
-      << "\"signature\":\"" << signature << "\","
-      << "\"base_va\":" << base_va << ","
-      << "\"windows\":[{"
-      << "\"window_id\":" << window_id << ","
-      << "\"start_va\":" << base_va << ","
-      << "\"end_va\":" << end_va << ","
-      << "\"key_id\":" << key_id << ","
-      << "\"type\":\"CODE\","
-      << "\"code_policy_id\":1"
-      << "}],"
-      << "\"pages\":[],"
-      << "\"cfi_level\":" << cfi_level << ','
-      << "\"call_targets\":" << NumberArrayJson(call_targets) << ','
-      << "\"jmp_targets\":" << NumberArrayJson(jmp_targets)
-      << "}";
-  return oss.str();
-}
 
 void PrintArtifacts(const sim::core::ExecResult& result, const sim::security::AuditCollector& audit) {
   for (const auto& event : audit.GetEvents()) {
@@ -87,14 +46,17 @@ sim::security::ContextHandle LoadProgram(sim::kernel::KernelProcessTable* proces
                                          std::uint32_t user_id, std::uint32_t key_id, std::uint32_t window_id,
                                          std::uint32_t cfi_level, const std::vector<std::uint64_t>& call_targets,
                                          const std::vector<std::uint64_t>& jmp_targets) {
-  const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, key_id);
-  const std::vector<std::uint8_t> code_memory = sim::security::BuildCodeMemory(ciphertext);
-  const std::uint64_t end_va = program.base_va + program.code.size() * sim::isa::kInstrBytes;
+  sim::security::SecureIrBuilderConfig config;
+  config.program_name = program_name;
+  config.user_id = user_id;
+  config.key_id = key_id;
+  config.window_id = window_id;
+  config.cfi_level = cfi_level;
+  config.call_targets = call_targets;
+  config.jmp_targets = jmp_targets;
 
-  const sim::security::ContextHandle handle = process_table->LoadProcess(
-      {MakeSecureIrJson(program_name, user_id, program.base_va, end_va, key_id, window_id, "stub-valid", cfi_level,
-                        call_targets, jmp_targets),
-       code_memory});
+  const sim::security::ContextHandle handle =
+      process_table->LoadProcess(sim::security::SecureIrBuilder::Build(program, config));
   process_table->ContextSwitch(handle);
   return handle;
 }

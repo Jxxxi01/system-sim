@@ -1,44 +1,20 @@
 #include <cstdint>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
 #include "kernel/process.hpp"
 #include "security/audit.hpp"
-#include "security/code_codec.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
-#include "security/securir_package.hpp"
+#include "security/securir_builder.hpp"
 
 namespace {
 
-std::string MakeSecureIrJson(const std::string& program_name, std::uint32_t user_id, std::uint64_t base_va,
-                             std::uint64_t end_va, std::uint32_t key_id, std::uint32_t window_id,
-                             const std::string& signature) {
-  std::ostringstream oss;
-  oss << "{"
-      << "\"program_name\":\"" << program_name << "\","
-      << "\"user_id\":" << user_id << ","
-      << "\"signature\":\"" << signature << "\","
-      << "\"base_va\":" << base_va << ","
-      << "\"windows\":[{"
-      << "\"window_id\":" << window_id << ","
-      << "\"start_va\":" << base_va << ","
-      << "\"end_va\":" << end_va << ","
-      << "\"key_id\":" << key_id << ","
-      << "\"type\":\"CODE\","
-      << "\"code_policy_id\":1"
-      << "}],"
-      << "\"pages\":[],"
-      << "\"cfi_level\":0,"
-      << "\"call_targets\":[],"
-      << "\"jmp_targets\":[]"
-      << "}";
-  return oss.str();
+std::uint64_t ProgramEndVa(const sim::isa::AsmProgram& program) {
+  return program.base_va + program.code.size() * sim::isa::kInstrBytes;
 }
 
 void PrintArtifacts(const sim::core::ExecResult& result, const sim::security::AuditCollector& audit) {
@@ -65,18 +41,20 @@ start:
   try {
     const std::uint64_t base_va = 0x1000;
     const sim::isa::AsmProgram program = sim::isa::AssembleText(source, base_va);
-    const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 11);
-    const std::vector<std::uint8_t> code_memory = sim::security::BuildCodeMemory(ciphertext);
-    const std::uint64_t end_va = base_va + program.code.size() * sim::isa::kInstrBytes;
 
     sim::security::SecurityHardware hardware;
     sim::security::Gateway gateway(hardware);
     sim::kernel::KernelProcessTable process_table(gateway, hardware, hardware.GetAuditCollector());
 
+    sim::security::SecureIrBuilderConfig allow_config;
+    allow_config.program_name = "demo_normal_allow";
+    allow_config.user_id = 1;
+    allow_config.key_id = 11;
+    allow_config.window_id = 1;
+
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle allow_handle =
-        process_table.LoadProcess({MakeSecureIrJson("demo_normal_allow", 1, base_va, end_va, 11, 1, "stub-valid"),
-                                   code_memory});
+        process_table.LoadProcess(sim::security::SecureIrBuilder::Build(program, allow_config));
     process_table.ContextSwitch(allow_handle);
 
     sim::core::ExecuteOptions allow_options;
@@ -87,10 +65,18 @@ start:
     sim::core::PrintRunSummary(allow_result, std::cout);
     PrintArtifacts(allow_result, hardware.GetAuditCollector());
 
+    sim::security::SecureIrBuilderConfig wrong_key_config;
+    wrong_key_config.program_name = "demo_normal_wrong_key";
+    wrong_key_config.user_id = 1;
+    wrong_key_config.key_id = 99;
+    wrong_key_config.window_id = 2;
+
+    sim::security::SecureIrPackage wrong_key_package = sim::security::SecureIrBuilder::Build(program, wrong_key_config);
+    wrong_key_package.code_memory = sim::security::SecureIrBuilder::Build(program, allow_config).code_memory;
+
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle wrong_key_handle =
-        process_table.LoadProcess(
-            {MakeSecureIrJson("demo_normal_wrong_key", 1, base_va, end_va, 99, 2, "stub-valid"), code_memory});
+        process_table.LoadProcess(std::move(wrong_key_package));
     process_table.ContextSwitch(wrong_key_handle);
 
     sim::core::ExecuteOptions wrong_key_options;

@@ -1,9 +1,8 @@
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
@@ -12,34 +11,9 @@
 #include "security/code_codec.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
-#include "security/securir_package.hpp"
+#include "security/securir_builder.hpp"
 
 namespace {
-
-std::string MakeSecureIrJson(const std::string& program_name, std::uint32_t user_id, std::uint64_t base_va,
-                             std::uint64_t end_va, std::uint32_t key_id, std::uint32_t window_id,
-                             const std::string& signature) {
-  std::ostringstream oss;
-  oss << "{"
-      << "\"program_name\":\"" << program_name << "\","
-      << "\"user_id\":" << user_id << ","
-      << "\"signature\":\"" << signature << "\","
-      << "\"base_va\":" << base_va << ","
-      << "\"windows\":[{"
-      << "\"window_id\":" << window_id << ","
-      << "\"start_va\":" << base_va << ","
-      << "\"end_va\":" << end_va << ","
-      << "\"key_id\":" << key_id << ","
-      << "\"type\":\"CODE\","
-      << "\"code_policy_id\":1"
-      << "}],"
-      << "\"pages\":[],"
-      << "\"cfi_level\":0,"
-      << "\"call_targets\":[],"
-      << "\"jmp_targets\":[]"
-      << "}";
-  return oss.str();
-}
 
 void PrintArtifacts(const sim::core::ExecResult& result, const sim::security::AuditCollector& audit) {
   for (const auto& event : audit.GetEvents()) {
@@ -54,16 +28,6 @@ sim::core::ExecResult RunProgram(sim::security::SecurityHardware* hardware, std:
   sim::core::ExecuteOptions options;
   options.hardware = hardware;
   return sim::core::ExecuteProgram(base_va, options);
-}
-
-sim::security::ContextHandle LoadProgram(sim::kernel::KernelProcessTable* process_table,
-                                         const std::string& program_name, std::uint64_t base_va,
-                                         std::uint64_t end_va, const std::vector<std::uint8_t>& code_memory,
-                                         std::uint32_t key_id, std::uint32_t window_id) {
-  const sim::security::ContextHandle handle = process_table->LoadProcess(
-      {MakeSecureIrJson(program_name, 1, base_va, end_va, key_id, window_id, "stub-valid"), code_memory});
-  process_table->ContextSwitch(handle);
-  return handle;
 }
 
 void XorWholeCiphertext(sim::security::SecurityHardware* hardware, sim::security::ContextHandle handle,
@@ -111,16 +75,24 @@ start:
   try {
     const std::uint64_t base_va = 0x1000;
     const sim::isa::AsmProgram program = sim::isa::AssembleText(source, base_va);
-    const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 11);
-    const std::vector<std::uint8_t> code_memory = sim::security::BuildCodeMemory(ciphertext);
-    const std::uint64_t end_va = base_va + program.code.size() * sim::isa::kInstrBytes;
 
     sim::security::SecurityHardware hardware;
     sim::security::Gateway gateway(hardware);
     sim::kernel::KernelProcessTable process_table(gateway, hardware, hardware.GetAuditCollector());
 
+    auto build_package = [&](const std::string& program_name, std::uint32_t window_id) {
+      sim::security::SecureIrBuilderConfig config;
+      config.program_name = program_name;
+      config.user_id = 1;
+      config.key_id = 11;
+      config.window_id = window_id;
+      return sim::security::SecureIrBuilder::Build(program, config);
+    };
+
     hardware.GetAuditCollector().Clear();
-    LoadProgram(&process_table, "demo_injection_case_a", base_va, end_va, code_memory, 11, 1);
+    const sim::security::ContextHandle baseline_handle =
+        process_table.LoadProcess(build_package("demo_injection_case_a", 1));
+    process_table.ContextSwitch(baseline_handle);
     const sim::core::ExecResult baseline_result = RunProgram(&hardware, base_va);
     std::cout << "[CASE_A_BASELINE]\n";
     sim::core::PrintRunSummary(baseline_result, std::cout);
@@ -128,7 +100,8 @@ start:
 
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle full_tamper_handle =
-        LoadProgram(&process_table, "demo_injection_case_b", base_va, end_va, code_memory, 11, 2);
+        process_table.LoadProcess(build_package("demo_injection_case_b", 2));
+    process_table.ContextSwitch(full_tamper_handle);
     XorWholeCiphertext(&hardware, full_tamper_handle, 0xFFu);
     const sim::core::ExecResult full_tamper_result = RunProgram(&hardware, base_va);
     std::cout << "[CASE_B_FULL_TAMPER]\n";
@@ -137,7 +110,8 @@ start:
 
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle partial_tamper_handle =
-        LoadProgram(&process_table, "demo_injection_case_c", base_va, end_va, code_memory, 11, 3);
+        process_table.LoadProcess(build_package("demo_injection_case_c", 3));
+    process_table.ContextSwitch(partial_tamper_handle);
     XorPayloadBytes(&hardware, partial_tamper_handle, 3, 0xAAu);
     const sim::core::ExecResult partial_tamper_result = RunProgram(&hardware, base_va);
     std::cout << "[CASE_C_PARTIAL_TAMPER]\n";
