@@ -1905,3 +1905,8 @@ Issue 11 分 A/B 两阶段：
 #### 4. 与 Phase A 方案的偏差
 - 无偏差。
 - 实施过程中评审发现过 3 个缺口，但都已修正并回到 Phase A 目标语义：`code_region` 所有权从内核收归 `Gateway::Release`；补上 `Gateway_Load_InvalidPageType_Fails`；补上 `LoadProcess_PvtFailure_FullRollback`。
+
+### Push 状态
+**已推送：** 2026-03-26
+**分支：** issue-11-secureir-gen
+**提交：** issue 11A: SecureIrPackage + unified loading chain
