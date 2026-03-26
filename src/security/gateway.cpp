@@ -247,6 +247,7 @@ struct SecureIr {
   std::string signature;
   std::uint64_t base_va = 0;
   std::vector<SecureIrWindow> windows;
+  std::vector<GatewayPageLayout> pages;
   std::uint32_t cfi_level = 0;
   std::vector<std::uint64_t> call_targets;
   std::vector<std::uint64_t> jmp_targets;
@@ -316,6 +317,19 @@ std::string RequireStringField(const JsonValue::Object& object, const char* name
   return RequireString(RequireField(object, name), name);
 }
 
+PvtPageType ParsePageType(const std::string& value) {
+  if (value == "CODE") {
+    return PvtPageType::CODE;
+  }
+  if (value == "DATA") {
+    return PvtPageType::DATA;
+  }
+
+  std::ostringstream oss;
+  oss << "gateway_invalid_page_type type=" << value;
+  throw std::runtime_error(oss.str());
+}
+
 std::vector<std::uint64_t> ParseNumberArray(const JsonValue::Array& array, const char* name) {
   std::vector<std::uint64_t> values;
   values.reserve(array.size());
@@ -350,7 +364,15 @@ SecureIr ParseSecureIr(const std::string& json) {
     secure_ir.windows.push_back(std::move(window));
   }
 
-  static_cast<void>(RequireArray(RequireField(object, "pages"), "pages"));
+  const JsonValue::Array& pages = RequireArray(RequireField(object, "pages"), "pages");
+  secure_ir.pages.reserve(pages.size());
+  for (const JsonValue& page_value : pages) {
+    const JsonValue::Object& page_object = RequireObject(page_value, "pages[]");
+    GatewayPageLayout page;
+    page.va = RequireU64Field(page_object, "va");
+    page.page_type = ParsePageType(RequireStringField(page_object, "page_type"));
+    secure_ir.pages.push_back(page);
+  }
   secure_ir.call_targets =
       ParseNumberArray(RequireArray(RequireField(object, "call_targets"), "call_targets"), "call_targets");
   secure_ir.jmp_targets =
@@ -381,7 +403,7 @@ std::string MakeReleaseDetail(bool released) {
 
 Gateway::Gateway(SecurityHardware& hardware) : hardware_(hardware) {}
 
-ContextHandle Gateway::Load(const std::string& json) {
+GatewayLoadResult Gateway::Load(SecureIrPackage package) {
   const ContextHandle handle = next_handle_++;
 
   try {
@@ -392,7 +414,7 @@ ContextHandle Gateway::Load(const std::string& json) {
       throw std::runtime_error(oss.str());
     }
 
-    const SecureIr secure_ir = ParseSecureIr(json);
+    const SecureIr secure_ir = ParseSecureIr(package.metadata);
 
     if (secure_ir.signature.empty()) {
       throw std::runtime_error("gateway_invalid_signature reason=empty");
@@ -426,12 +448,19 @@ ContextHandle Gateway::Load(const std::string& json) {
     hardware_.GetEwcTable().SetWindows(handle, std::move(windows));
     hardware_.GetSpeTable().ConfigurePolicy(handle, secure_ir.user_id, secure_ir.cfi_level,
                                             secure_ir.call_targets, secure_ir.jmp_targets);
+    hardware_.StoreCodeRegion(handle, secure_ir.base_va, std::move(package.code_memory));
     handle_to_user_[handle] = secure_ir.user_id;
     hardware_.GetAuditCollector().LogEvent("GATEWAY_LOAD_OK", secure_ir.user_id, handle, secure_ir.base_va,
                                            MakeLoadOkDetail(secure_ir));
-    return handle;
+    GatewayLoadResult result;
+    result.handle = handle;
+    result.user_id = secure_ir.user_id;
+    result.base_va = secure_ir.base_va;
+    result.pages = secure_ir.pages;
+    return result;
   } catch (const std::exception& ex) {
     handle_to_user_.erase(handle);
+    hardware_.RemoveCodeRegion(handle);
     hardware_.GetSpeTable().ClearPolicy(handle);
     hardware_.GetEwcTable().ClearWindows(handle);
     hardware_.GetAuditCollector().LogEvent("GATEWAY_LOAD_FAIL", 0, handle, 0, MakeLoadFailDetail(ex.what()));
@@ -446,6 +475,7 @@ void Gateway::Release(ContextHandle handle) {
   if (released) {
     handle_to_user_.erase(it);
   }
+  hardware_.RemoveCodeRegion(handle);
   hardware_.GetSpeTable().ClearPolicy(handle);
   hardware_.GetEwcTable().ClearWindows(handle);
   hardware_.GetAuditCollector().LogEvent("GATEWAY_RELEASE", user_id, handle, 0, MakeReleaseDetail(released));

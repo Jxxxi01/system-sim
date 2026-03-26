@@ -50,6 +50,15 @@ std::string MakeCodeWindowJson(std::uint32_t window_id, std::uint64_t start_va, 
   return oss.str();
 }
 
+std::string MakePagesJson(std::uint64_t va, const std::string& page_type) {
+  std::ostringstream oss;
+  oss << "[{"
+      << "\"va\":" << va << ","
+      << "\"page_type\":\"" << page_type << "\""
+      << "}]";
+  return oss.str();
+}
+
 bool Contains(const std::string& text, const std::string& needle) {
   return text.find(needle) != std::string::npos;
 }
@@ -59,11 +68,18 @@ bool Contains(const std::string& text, const std::string& needle) {
 SIM_TEST(Gateway_Load_ValidSecureIR_ConfiguresEwcAndReturnsHandle) {
   sim::security::SecurityHardware hardware;
   sim::security::Gateway gateway(hardware);
-  const std::string json = MakeSecureIrJson("demo", 7, "stub-valid", 4096, MakeCodeWindowJson(1, 4096, 4104, 11));
+  const std::string json = MakeSecureIrJson(
+      "demo", 7, "stub-valid", 4096, MakeCodeWindowJson(1, 4096, 4104, 11), "[{\"va\":4096,\"page_type\":\"CODE\"}]");
 
-  const sim::security::ContextHandle handle = gateway.Load(json);
+  const sim::security::GatewayLoadResult load_result = gateway.Load({json, {}});
+  const sim::security::ContextHandle handle = load_result.handle;
 
   SIM_EXPECT_EQ(handle, static_cast<sim::security::ContextHandle>(1));
+  SIM_EXPECT_EQ(load_result.user_id, 7u);
+  SIM_EXPECT_EQ(load_result.base_va, 4096u);
+  SIM_EXPECT_EQ(load_result.pages.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_EQ(load_result.pages[0].va, 4096u);
+  SIM_EXPECT_EQ(load_result.pages[0].page_type, sim::security::PvtPageType::CODE);
   const auto user_id = gateway.GetUserIdForHandle(handle);
   SIM_EXPECT_TRUE(user_id.has_value());
   SIM_EXPECT_EQ(user_id.value(), 7u);
@@ -89,9 +105,9 @@ SIM_TEST(Gateway_Load_MultipleCalls_UniqueHandles) {
   sim::security::Gateway gateway(hardware);
 
   const auto handle_a =
-      gateway.Load(MakeSecureIrJson("demo_a", 1, "sig-a", 4096, MakeCodeWindowJson(1, 4096, 4104, 11)));
+      gateway.Load({MakeSecureIrJson("demo_a", 1, "sig-a", 4096, MakeCodeWindowJson(1, 4096, 4104, 11)), {}}).handle;
   const auto handle_b =
-      gateway.Load(MakeSecureIrJson("demo_b", 2, "sig-b", 8192, MakeCodeWindowJson(2, 8192, 8200, 12)));
+      gateway.Load({MakeSecureIrJson("demo_b", 2, "sig-b", 8192, MakeCodeWindowJson(2, 8192, 8200, 12)), {}}).handle;
 
   SIM_EXPECT_EQ(handle_a, static_cast<sim::security::ContextHandle>(1));
   SIM_EXPECT_EQ(handle_b, static_cast<sim::security::ContextHandle>(2));
@@ -104,7 +120,7 @@ SIM_TEST(Gateway_Load_EmptySignature_Fails) {
 
   try {
     static_cast<void>(
-        gateway.Load(MakeSecureIrJson("demo", 3, "", 4096, MakeCodeWindowJson(1, 4096, 4104, 11))));
+        gateway.Load({MakeSecureIrJson("demo", 3, "", 4096, MakeCodeWindowJson(1, 4096, 4104, 11)), {}}));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_signature"));
@@ -124,7 +140,7 @@ SIM_TEST(Gateway_Load_MissingWindows_Fails) {
       "\"pages\":[],\"cfi_level\":0,\"call_targets\":[],\"jmp_targets\":[]}";
 
   try {
-    static_cast<void>(gateway.Load(json));
+    static_cast<void>(gateway.Load({json, {}}));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_missing_field field=windows"));
@@ -139,7 +155,7 @@ SIM_TEST(Gateway_Load_EmptyWindows_Fails) {
   sim::security::Gateway gateway(hardware);
 
   try {
-    static_cast<void>(gateway.Load(MakeSecureIrJson("demo", 1, "sig", 4096, "[]")));
+    static_cast<void>(gateway.Load({MakeSecureIrJson("demo", 1, "sig", 4096, "[]"), {}}));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_windows"));
@@ -153,8 +169,10 @@ SIM_TEST(Gateway_HandleToUserIdMapping_Correct) {
   sim::security::SecurityHardware hardware;
   sim::security::Gateway gateway(hardware);
 
-  const auto handle =
-      gateway.Load(MakeSecureIrJson("demo", 99, "sig", 12288, MakeCodeWindowJson(1, 12288, 12296, 5)));
+  const auto handle = gateway
+                          .Load({MakeSecureIrJson("demo", 99, "sig", 12288, MakeCodeWindowJson(1, 12288, 12296, 5)),
+                                 {}})
+                          .handle;
   const std::optional<std::uint32_t> user_id = gateway.GetUserIdForHandle(handle);
 
   SIM_EXPECT_TRUE(user_id.has_value());
@@ -167,17 +185,22 @@ SIM_TEST(Gateway_Release_ClearsMappingWindowsAndDoesNotReuseHandle) {
   sim::security::Gateway gateway(hardware);
   const std::uint64_t base_a = 0x3200;
   const sim::security::ContextHandle handle_a =
-      gateway.Load(MakeSecureIrJson("demo_a", 41, "sig-a", base_a, MakeCodeWindowJson(1, base_a, base_a + 8, 21)));
+      gateway.Load({MakeSecureIrJson("demo_a", 41, "sig-a", base_a, MakeCodeWindowJson(1, base_a, base_a + 8, 21)),
+                    {}})
+          .handle;
 
   gateway.Release(handle_a);
 
   SIM_EXPECT_TRUE(!gateway.GetUserIdForHandle(handle_a).has_value());
+  SIM_EXPECT_TRUE(hardware.GetCodeRegion(handle_a) == nullptr);
   const sim::security::EwcQueryResult released_query = hardware.GetEwcTable().Query(base_a, handle_a);
   SIM_EXPECT_TRUE(!released_query.allow);
   SIM_EXPECT_TRUE(!released_query.matched_window);
 
-  const sim::security::ContextHandle handle_b = gateway.Load(
-      MakeSecureIrJson("demo_b", 42, "sig-b", 0x4200, MakeCodeWindowJson(2, 0x4200, 0x4208, 22)));
+  const sim::security::ContextHandle handle_b =
+      gateway
+          .Load({MakeSecureIrJson("demo_b", 42, "sig-b", 0x4200, MakeCodeWindowJson(2, 0x4200, 0x4208, 22)), {}})
+          .handle;
   SIM_EXPECT_EQ(handle_a, static_cast<sim::security::ContextHandle>(1));
   SIM_EXPECT_EQ(handle_b, static_cast<sim::security::ContextHandle>(2));
   SIM_EXPECT_TRUE(handle_b != handle_a);
@@ -198,7 +221,7 @@ SIM_TEST(Gateway_Load_OverlappingWindows_Fails) {
       "{\"window_id\":2,\"start_va\":4104,\"end_va\":4120,\"key_id\":11,\"type\":\"CODE\",\"code_policy_id\":1}]";
 
   try {
-    static_cast<void>(gateway.Load(MakeSecureIrJson("demo", 1, "sig", 4096, windows)));
+    static_cast<void>(gateway.Load({MakeSecureIrJson("demo", 1, "sig", 4096, windows), {}}));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "overlap"));
@@ -214,8 +237,8 @@ SIM_TEST(Gateway_Load_InvalidType_Fails) {
   sim::security::Gateway gateway(hardware);
 
   try {
-    static_cast<void>(
-        gateway.Load(MakeSecureIrJson("demo", 1, "sig", 4096, MakeCodeWindowJson(1, 4096, 4104, 11, "DATA"))));
+    static_cast<void>(gateway.Load(
+        {MakeSecureIrJson("demo", 1, "sig", 4096, MakeCodeWindowJson(1, 4096, 4104, 11, "DATA")), {}}));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_window_type"));
@@ -225,14 +248,44 @@ SIM_TEST(Gateway_Load_InvalidType_Fails) {
   }
 }
 
+SIM_TEST(Gateway_Load_InvalidPageType_Fails) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  const std::uint64_t base = 0x4600;
+
+  try {
+    static_cast<void>(gateway.Load({MakeSecureIrJson("demo", 1, "sig", base, MakeCodeWindowJson(1, base, base + 8, 11),
+                                                    MakePagesJson(base, "EXECUTE")),
+                                    {1, 2, 3, 4}}));
+    SIM_EXPECT_TRUE(false);
+  } catch (const std::runtime_error& ex) {
+    SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_page_type"));
+  }
+
+  const auto& events = hardware.GetAuditCollector().GetEvents();
+  SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+  SIM_EXPECT_TRUE(Contains(events[0].detail, "gateway_invalid_page_type"));
+  SIM_EXPECT_TRUE(hardware.GetCodeRegion(1) == nullptr);
+  const sim::security::EwcQueryResult query = hardware.GetEwcTable().Query(base, 1);
+  SIM_EXPECT_TRUE(!query.allow);
+  SIM_EXPECT_TRUE(!query.matched_window);
+  const sim::security::SpeCheckResult spe_result =
+      hardware.GetSpeTable().CheckInstruction(1, sim::isa::Op::RET, base, base, base + 4);
+  SIM_EXPECT_TRUE(spe_result.allow);
+}
+
 SIM_TEST(Gateway_Load_CapacityOverflow_Fails) {
   sim::security::SecurityHardware hardware;
   sim::security::Gateway gateway(hardware);
 
   for (std::size_t i = 0; i < sim::security::kMaxContextHandles; ++i) {
     const std::uint64_t base = 0x5000 + static_cast<std::uint64_t>(i) * 0x100;
-    const auto handle = gateway.Load(MakeSecureIrJson(
-        "demo", static_cast<std::uint32_t>(i + 1), "sig", base, MakeCodeWindowJson(1, base, base + 8, 10)));
+    const auto handle = gateway
+                            .Load({MakeSecureIrJson("demo", static_cast<std::uint32_t>(i + 1), "sig", base,
+                                                    MakeCodeWindowJson(1, base, base + 8, 10)),
+                                   {}})
+                            .handle;
     SIM_EXPECT_EQ(handle, static_cast<sim::security::ContextHandle>(i + 1));
   }
 
@@ -240,7 +293,7 @@ SIM_TEST(Gateway_Load_CapacityOverflow_Fails) {
 
   try {
     static_cast<void>(gateway.Load(
-        MakeSecureIrJson("overflow", 999, "sig", 0xF000, MakeCodeWindowJson(1, 0xF000, 0xF008, 99))));
+        {MakeSecureIrJson("overflow", 999, "sig", 0xF000, MakeCodeWindowJson(1, 0xF000, 0xF008, 99)), {}}));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_capacity_exceeded"));
@@ -264,8 +317,9 @@ SIM_TEST(AuditCollector_UnifiedEvents) {
   const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, 55);
   const std::vector<std::uint8_t> code_memory = sim::security::BuildCodeMemory(ciphertext);
   const sim::security::ContextHandle handle =
-      gateway.Load(MakeSecureIrJson("demo", 5, "sig", base, MakeCodeWindowJson(1, base, base + 8, 77)));
-  hardware.StoreCodeRegion(handle, base, code_memory);
+      gateway.Load({MakeSecureIrJson("demo", 5, "sig", base, MakeCodeWindowJson(1, base, base + 8, 77)),
+                    code_memory})
+          .handle;
   hardware.SetActiveHandle(handle);
 
   sim::core::ExecuteOptions options;

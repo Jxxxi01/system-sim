@@ -64,6 +64,10 @@ sim::kernel::KernelProcessTable MakeProcessTable(sim::security::Gateway& gateway
   return sim::kernel::KernelProcessTable(gateway, hardware, hardware.GetAuditCollector());
 }
 
+sim::security::SecureIrPackage MakePackage(const std::string& metadata, std::vector<std::uint8_t> code_memory = {}) {
+  return sim::security::SecureIrPackage{metadata, code_memory};
+}
+
 sim::security::ExecWindow MakeWindow(std::uint64_t start_va, std::uint64_t end_va, std::uint32_t owner_user_id,
                                      sim::security::MemoryPermissions permissions) {
   sim::security::ExecWindow window;
@@ -197,11 +201,11 @@ SIM_TEST(LoadProcess_WithPages_RegistersPvt) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x7000;
 
-  const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 55, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + sim::security::kPageSize,
-                                                                      11),
+  const sim::security::ContextHandle handle = processes.LoadProcess(MakePackage(
+      MakeSecureIrJson("proc", 55, "sig", base_va,
+                       MakeCodeWindowJson(1, base_va, base_va + sim::security::kPageSize, 11),
                        MakePagesJson(base_va, "CODE")),
-      {1, 2, 3, 4});
+      {1, 2, 3, 4}));
 
   SIM_EXPECT_EQ(handle, static_cast<sim::security::ContextHandle>(1));
   const sim::security::PvtEntry* entry = hardware.GetPvtTable().LookupPage(base_va / sim::security::kPageSize);

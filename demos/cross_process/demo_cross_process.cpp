@@ -14,6 +14,7 @@
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
 #include "security/pvt.hpp"
+#include "security/securir_package.hpp"
 
 namespace {
 
@@ -125,9 +126,10 @@ CaseAOutcome RunCaseA(const sim::isa::AsmProgram& alice_program, const std::vect
   audit.Clear();
 
   const sim::security::ContextHandle alice_handle =
-      process_table.LoadProcess(MakeSecureIrJson("alice_case_a", 1001, alice_base_va, ProgramEndVa(alice_program), 11,
-                                                 1, "stub-valid", {{alice_base_va, "CODE"}}),
-                                alice_code_memory);
+      process_table.LoadProcess(
+          {MakeSecureIrJson("alice_case_a", 1001, alice_base_va, ProgramEndVa(alice_program), 11, 1, "stub-valid",
+                            {{alice_base_va, "CODE"}}),
+           alice_code_memory});
   process_table.ContextSwitch(alice_handle);
   const sim::core::ExecResult result = RunProgram(hardware, alice_base_va);
 
@@ -150,13 +152,14 @@ CaseBOutcome RunCaseB(const sim::isa::AsmProgram& alice_program, const std::vect
   audit.Clear();
 
   static_cast<void>(process_table.LoadProcess(
-      MakeSecureIrJson("alice_case_b", 1001, alice_base_va, ProgramEndVa(alice_program), 11, 1, "stub-valid",
-                       {{alice_base_va, "CODE"}}),
-      alice_code_memory));
+      {MakeSecureIrJson("alice_case_b", 1001, alice_base_va, ProgramEndVa(alice_program), 11, 1, "stub-valid",
+                        {{alice_base_va, "CODE"}}),
+       alice_code_memory}));
   const sim::security::ContextHandle bob_handle =
-      process_table.LoadProcess(MakeSecureIrJson("bob_case_b", 1002, bob_base_va, ProgramEndVa(bob_program), 22, 2,
-                                                 "stub-valid", {{bob_base_va, "CODE"}}),
-                                bob_code_memory);
+      process_table.LoadProcess(
+          {MakeSecureIrJson("bob_case_b", 1002, bob_base_va, ProgramEndVa(bob_program), 22, 2, "stub-valid",
+                            {{bob_base_va, "CODE"}}),
+           bob_code_memory});
 
   const sim::security::PvtRegisterResult register_result =
       hardware.GetPvtTable().RegisterPage(bob_handle, alice_base_va, sim::security::PvtPageType::CODE);
@@ -187,9 +190,9 @@ sim::core::ExecResult RunCaseC(const sim::isa::AsmProgram& alice_program, const 
   audit.Clear();
 
   const sim::security::ContextHandle bob_handle =
-      process_table.LoadProcess(MakeSecureIrJson("bob_case_c", 1002, bob_base_va, ProgramEndVa(bob_program), 22, 2,
-                                                 "stub-valid", {}),
-                                bob_code_memory);
+      process_table.LoadProcess(
+          {MakeSecureIrJson("bob_case_c", 1002, bob_base_va, ProgramEndVa(bob_program), 22, 2, "stub-valid", {}),
+           bob_code_memory});
 
   hardware.StoreCodeRegion(bob_handle, alice_base_va, alice_code_memory);
   process_table.ContextSwitch(bob_handle);

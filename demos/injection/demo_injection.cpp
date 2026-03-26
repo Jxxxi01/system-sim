@@ -7,10 +7,12 @@
 
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
+#include "kernel/process.hpp"
 #include "security/audit.hpp"
 #include "security/code_codec.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
+#include "security/securir_package.hpp"
 
 namespace {
 
@@ -54,14 +56,13 @@ sim::core::ExecResult RunProgram(sim::security::SecurityHardware* hardware, std:
   return sim::core::ExecuteProgram(base_va, options);
 }
 
-sim::security::ContextHandle LoadProgram(sim::security::Gateway* gateway, sim::security::SecurityHardware* hardware,
+sim::security::ContextHandle LoadProgram(sim::kernel::KernelProcessTable* process_table,
                                          const std::string& program_name, std::uint64_t base_va,
                                          std::uint64_t end_va, const std::vector<std::uint8_t>& code_memory,
                                          std::uint32_t key_id, std::uint32_t window_id) {
-  const sim::security::ContextHandle handle =
-      gateway->Load(MakeSecureIrJson(program_name, 1, base_va, end_va, key_id, window_id, "stub-valid"));
-  hardware->StoreCodeRegion(handle, base_va, code_memory);
-  hardware->SetActiveHandle(handle);
+  const sim::security::ContextHandle handle = process_table->LoadProcess(
+      {MakeSecureIrJson(program_name, 1, base_va, end_va, key_id, window_id, "stub-valid"), code_memory});
+  process_table->ContextSwitch(handle);
   return handle;
 }
 
@@ -116,9 +117,10 @@ start:
 
     sim::security::SecurityHardware hardware;
     sim::security::Gateway gateway(hardware);
+    sim::kernel::KernelProcessTable process_table(gateway, hardware, hardware.GetAuditCollector());
 
     hardware.GetAuditCollector().Clear();
-    LoadProgram(&gateway, &hardware, "demo_injection_case_a", base_va, end_va, code_memory, 11, 1);
+    LoadProgram(&process_table, "demo_injection_case_a", base_va, end_va, code_memory, 11, 1);
     const sim::core::ExecResult baseline_result = RunProgram(&hardware, base_va);
     std::cout << "[CASE_A_BASELINE]\n";
     sim::core::PrintRunSummary(baseline_result, std::cout);
@@ -126,7 +128,7 @@ start:
 
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle full_tamper_handle =
-        LoadProgram(&gateway, &hardware, "demo_injection_case_b", base_va, end_va, code_memory, 11, 2);
+        LoadProgram(&process_table, "demo_injection_case_b", base_va, end_va, code_memory, 11, 2);
     XorWholeCiphertext(&hardware, full_tamper_handle, 0xFFu);
     const sim::core::ExecResult full_tamper_result = RunProgram(&hardware, base_va);
     std::cout << "[CASE_B_FULL_TAMPER]\n";
@@ -135,7 +137,7 @@ start:
 
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle partial_tamper_handle =
-        LoadProgram(&gateway, &hardware, "demo_injection_case_c", base_va, end_va, code_memory, 11, 3);
+        LoadProgram(&process_table, "demo_injection_case_c", base_va, end_va, code_memory, 11, 3);
     XorPayloadBytes(&hardware, partial_tamper_handle, 3, 0xAAu);
     const sim::core::ExecResult partial_tamper_result = RunProgram(&hardware, base_va);
     std::cout << "[CASE_C_PARTIAL_TAMPER]\n";

@@ -13,6 +13,7 @@
 #include "security/code_codec.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
+#include "security/securir_package.hpp"
 
 namespace {
 
@@ -88,13 +89,13 @@ int main() {
     sim::kernel::KernelProcessTable process_table(gateway, hardware, audit);
 
     const sim::security::ContextHandle alice_handle =
-        process_table.LoadProcess(MakeSecureIrJson("alice_demo", 1001, alice_base_va, ProgramEndVa(alice_program), 11,
-                                                   1, "stub-valid"),
-                                  alice_code_memory);
+        process_table.LoadProcess(
+            {MakeSecureIrJson("alice_demo", 1001, alice_base_va, ProgramEndVa(alice_program), 11, 1, "stub-valid"),
+             alice_code_memory});
     const sim::security::ContextHandle bob_handle =
-        process_table.LoadProcess(MakeSecureIrJson("bob_demo", 1002, bob_base_va, ProgramEndVa(bob_program), 22, 2,
-                                                   "stub-valid"),
-                                  bob_code_memory);
+        process_table.LoadProcess(
+            {MakeSecureIrJson("bob_demo", 1002, bob_base_va, ProgramEndVa(bob_program), 22, 2, "stub-valid"),
+             bob_code_memory});
 
     auto run_case = [&](const char* label, sim::security::ContextHandle handle,
                         std::uint64_t entry_pc) -> sim::core::ExecResult {

@@ -48,6 +48,15 @@ std::string MakeCodeWindowJson(std::uint32_t window_id, std::uint64_t start_va, 
   return oss.str();
 }
 
+std::string MakePagesJson(std::uint64_t va, const char* page_type) {
+  std::ostringstream oss;
+  oss << "[{"
+      << "\"va\":" << va << ","
+      << "\"page_type\":\"" << page_type << "\""
+      << "}]";
+  return oss.str();
+}
+
 bool Contains(const std::string& text, const std::string& needle) {
   return text.find(needle) != std::string::npos;
 }
@@ -55,6 +64,10 @@ bool Contains(const std::string& text, const std::string& needle) {
 sim::kernel::KernelProcessTable MakeProcessTable(sim::security::Gateway& gateway,
                                                  sim::security::SecurityHardware& hardware) {
   return sim::kernel::KernelProcessTable(gateway, hardware, hardware.GetAuditCollector());
+}
+
+sim::security::SecureIrPackage MakePackage(const std::string& metadata, std::vector<std::uint8_t> code_memory = {}) {
+  return sim::security::SecureIrPackage{metadata, code_memory};
 }
 
 }  // namespace
@@ -66,7 +79,8 @@ SIM_TEST(LoadProcess_Success_ProcessQueryable) {
   const std::uint64_t base_va = 0x2000;
 
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 11, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 7)), {1, 2, 3, 4});
+      MakePackage(MakeSecureIrJson("proc", 11, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 7)),
+                  {1, 2, 3, 4}));
 
   const sim::kernel::ProcessContext* process = processes.GetProcess(handle);
   SIM_EXPECT_TRUE(process != nullptr);
@@ -85,7 +99,8 @@ SIM_TEST(LoadProcess_Success_CodeMemoryInHardware) {
   const std::vector<std::uint8_t> code_memory{9, 8, 7, 6};
 
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 12, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 13)), code_memory);
+      MakePackage(MakeSecureIrJson("proc", 12, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 13)),
+                  code_memory));
 
   const sim::security::CodeRegion* region = hardware.GetCodeRegion(handle);
   SIM_EXPECT_TRUE(region != nullptr);
@@ -101,9 +116,11 @@ SIM_TEST(LoadProcess_MultiUser_HandleIsolation) {
   const std::uint64_t base_b = 0x4000;
 
   const sim::security::ContextHandle handle_a = processes.LoadProcess(
-      MakeSecureIrJson("proc_a", 21, "sig-a", base_a, MakeCodeWindowJson(1, base_a, base_a + 8, 3)), {1, 1, 1, 1});
+      MakePackage(MakeSecureIrJson("proc_a", 21, "sig-a", base_a, MakeCodeWindowJson(1, base_a, base_a + 8, 3)),
+                  {1, 1, 1, 1}));
   const sim::security::ContextHandle handle_b = processes.LoadProcess(
-      MakeSecureIrJson("proc_b", 22, "sig-b", base_b, MakeCodeWindowJson(2, base_b, base_b + 8, 4)), {2, 2, 2, 2});
+      MakePackage(MakeSecureIrJson("proc_b", 22, "sig-b", base_b, MakeCodeWindowJson(2, base_b, base_b + 8, 4)),
+                  {2, 2, 2, 2}));
 
   SIM_EXPECT_TRUE(handle_a != handle_b);
   SIM_EXPECT_EQ(processes.GetProcess(handle_a)->user_id, 21u);
@@ -125,7 +142,8 @@ SIM_TEST(ContextSwitch_UpdatesActive_EmitsAudit) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x5000;
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 31, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 6)), {1, 2, 3, 4});
+      MakePackage(MakeSecureIrJson("proc", 31, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 6)),
+                  {1, 2, 3, 4}));
 
   hardware.GetAuditCollector().Clear();
   processes.ContextSwitch(handle);
@@ -148,7 +166,8 @@ SIM_TEST(SetActiveHandle_Valid_Succeeds) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x5200;
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 33, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 5)), {1, 2, 3, 4});
+      MakePackage(MakeSecureIrJson("proc", 33, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 5)),
+                  {1, 2, 3, 4}));
 
   hardware.SetActiveHandle(handle);
 
@@ -187,7 +206,8 @@ SIM_TEST(ContextSwitch_Idempotent) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x5400;
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 32, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 9)), {5, 6, 7, 8});
+      MakePackage(MakeSecureIrJson("proc", 32, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 9)),
+                  {5, 6, 7, 8}));
 
   hardware.GetAuditCollector().Clear();
   processes.ContextSwitch(handle);
@@ -210,7 +230,8 @@ SIM_TEST(ReleaseProcess_RemovesFromTable) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x5800;
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 41, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)), {1, 3, 5, 7});
+      MakePackage(MakeSecureIrJson("proc", 41, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)),
+                  {1, 3, 5, 7}));
 
   processes.ReleaseProcess(handle);
 
@@ -224,7 +245,8 @@ SIM_TEST(ReleaseProcess_ActiveHandle_ResetsActive) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x5c00;
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 42, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)), {2, 4, 6, 8});
+      MakePackage(MakeSecureIrJson("proc", 42, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)),
+                  {2, 4, 6, 8}));
 
   processes.ContextSwitch(handle);
   processes.ReleaseProcess(handle);
@@ -238,7 +260,8 @@ SIM_TEST(ReleaseProcess_ActiveHandle_ClearsHardwareActive) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x5e00;
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 43, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 3)), {8, 6, 4, 2});
+      MakePackage(MakeSecureIrJson("proc", 43, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 3)),
+                  {8, 6, 4, 2}));
 
   processes.ContextSwitch(handle);
   processes.ReleaseProcess(handle);
@@ -252,7 +275,8 @@ SIM_TEST(ReleaseProcess_CodeMemoryRemovedFromHardware) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x6000;
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 43, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)), {9, 9, 9, 9});
+      MakePackage(MakeSecureIrJson("proc", 43, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)),
+                  {9, 9, 9, 9}));
 
   processes.ReleaseProcess(handle);
 
@@ -265,7 +289,8 @@ SIM_TEST(ReleaseProcess_ThenContextSwitch_Throws) {
   sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
   const std::uint64_t base_va = 0x6400;
   const sim::security::ContextHandle handle = processes.LoadProcess(
-      MakeSecureIrJson("proc", 44, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)), {7, 7, 7, 7});
+      MakePackage(MakeSecureIrJson("proc", 44, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)),
+                  {7, 7, 7, 7}));
 
   processes.ReleaseProcess(handle);
 
@@ -285,7 +310,8 @@ SIM_TEST(LoadProcess_GatewayError_NoDirtyState) {
 
   try {
     static_cast<void>(processes.LoadProcess(
-        MakeSecureIrJson("broken", 51, "", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)), {1, 2, 3, 4}));
+        MakePackage(MakeSecureIrJson("broken", 51, "", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 2)),
+                    {1, 2, 3, 4})));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_signature"));
@@ -301,6 +327,28 @@ SIM_TEST(LoadProcess_GatewayError_NoDirtyState) {
   const auto& events = hardware.GetAuditCollector().GetEvents();
   SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
   SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+}
+
+SIM_TEST(LoadProcess_PvtFailure_FullRollback) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  sim::kernel::KernelProcessTable processes = MakeProcessTable(gateway, hardware);
+  const std::uint64_t base_va = 0x6C00;
+  const std::uint64_t out_of_window_va = base_va + sim::security::kPageSize;
+
+  try {
+    static_cast<void>(processes.LoadProcess(MakePackage(
+        MakeSecureIrJson("pvt_fail", 61, "sig", base_va, MakeCodeWindowJson(1, base_va, base_va + 8, 3),
+                         MakePagesJson(out_of_window_va, "CODE")),
+        {1, 2, 3, 4})));
+    SIM_EXPECT_TRUE(false);
+  } catch (const std::runtime_error& ex) {
+    SIM_EXPECT_TRUE(Contains(ex.what(), "missing_window"));
+  }
+
+  SIM_EXPECT_TRUE(!gateway.GetUserIdForHandle(1).has_value());
+  SIM_EXPECT_TRUE(hardware.GetCodeRegion(1) == nullptr);
+  SIM_EXPECT_TRUE(processes.GetProcess(1) == nullptr);
 }
 
 int main() {

@@ -7,10 +7,12 @@
 
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
+#include "kernel/process.hpp"
 #include "security/audit.hpp"
 #include "security/code_codec.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
+#include "security/securir_package.hpp"
 
 namespace {
 
@@ -80,21 +82,20 @@ std::string MakeRopSource(std::uint64_t bad_addr) {
   return oss.str();
 }
 
-sim::security::ContextHandle LoadProgram(sim::security::Gateway* gateway, sim::security::SecurityHardware* hardware,
-                                         const std::string& program_name, const sim::isa::AsmProgram& program,
+sim::security::ContextHandle LoadProgram(sim::kernel::KernelProcessTable* process_table,
+                                         const sim::isa::AsmProgram& program, const std::string& program_name,
                                          std::uint32_t user_id, std::uint32_t key_id, std::uint32_t window_id,
-                                         std::uint32_t cfi_level,
-                                         const std::vector<std::uint64_t>& call_targets,
+                                         std::uint32_t cfi_level, const std::vector<std::uint64_t>& call_targets,
                                          const std::vector<std::uint64_t>& jmp_targets) {
   const sim::security::CipherProgram ciphertext = sim::security::EncryptProgram(program, key_id);
   const std::vector<std::uint8_t> code_memory = sim::security::BuildCodeMemory(ciphertext);
   const std::uint64_t end_va = program.base_va + program.code.size() * sim::isa::kInstrBytes;
 
-  const sim::security::ContextHandle handle =
-      gateway->Load(MakeSecureIrJson(program_name, user_id, program.base_va, end_va, key_id, window_id,
-                                     "stub-valid", cfi_level, call_targets, jmp_targets));
-  hardware->StoreCodeRegion(handle, program.base_va, code_memory);
-  hardware->SetActiveHandle(handle);
+  const sim::security::ContextHandle handle = process_table->LoadProcess(
+      {MakeSecureIrJson(program_name, user_id, program.base_va, end_va, key_id, window_id, "stub-valid", cfi_level,
+                        call_targets, jmp_targets),
+       code_memory});
+  process_table->ContextSwitch(handle);
   return handle;
 }
 
@@ -104,7 +105,7 @@ sim::core::ExecResult RunProgram(sim::security::SecurityHardware* hardware, std:
   return sim::core::ExecuteProgram(base_va, options);
 }
 
-sim::core::ExecResult RunCase(const char* label, sim::security::Gateway* gateway,
+sim::core::ExecResult RunCase(const char* label, sim::kernel::KernelProcessTable* process_table,
                               sim::security::SecurityHardware* hardware, const std::string& program_name,
                               const sim::isa::AsmProgram& program, std::uint32_t user_id, std::uint32_t key_id,
                               std::uint32_t window_id, std::uint32_t cfi_level,
@@ -112,8 +113,7 @@ sim::core::ExecResult RunCase(const char* label, sim::security::Gateway* gateway
                               const std::vector<std::uint64_t>& jmp_targets) {
   sim::security::AuditCollector& audit = hardware->GetAuditCollector();
   audit.Clear();
-  LoadProgram(gateway, hardware, program_name, program, user_id, key_id, window_id, cfi_level, call_targets,
-              jmp_targets);
+  LoadProgram(process_table, program, program_name, user_id, key_id, window_id, cfi_level, call_targets, jmp_targets);
 
   const sim::core::ExecResult result = RunProgram(hardware, program.base_va);
   std::cout << '[' << label << "]\n";
@@ -128,6 +128,7 @@ int main() {
   try {
     sim::security::SecurityHardware hardware;
     sim::security::Gateway gateway(hardware);
+    sim::kernel::KernelProcessTable process_table(gateway, hardware, hardware.GetAuditCollector());
 
     const std::uint64_t case_a_base = 0x3000;
     const std::string case_a_source = R"(
@@ -157,14 +158,14 @@ func:
         sim::isa::AssembleText(MakeRopSource(case_c2_bad_addr), case_c2_base);
     const std::vector<std::uint64_t> case_c2_call_targets = {InstructionVa(case_c2_base, 2)};
 
-    const sim::core::ExecResult case_a = RunCase("CASE_A_L3_NORMAL", &gateway, &hardware, "demo_rop_case_a",
+    const sim::core::ExecResult case_a = RunCase("CASE_A_L3_NORMAL", &process_table, &hardware, "demo_rop_case_a",
                                                  case_a_program, 1, 11, 1, 3, case_a_call_targets, {});
-    const sim::core::ExecResult case_b = RunCase("CASE_B_L3_ROP", &gateway, &hardware, "demo_rop_case_b",
+    const sim::core::ExecResult case_b = RunCase("CASE_B_L3_ROP", &process_table, &hardware, "demo_rop_case_b",
                                                  case_b_program, 1, 11, 2, 3, case_b_call_targets, {});
-    const sim::core::ExecResult case_c1 = RunCase("CASE_C1_L1_ROP_WINDOW_OK", &gateway, &hardware,
+    const sim::core::ExecResult case_c1 = RunCase("CASE_C1_L1_ROP_WINDOW_OK", &process_table, &hardware,
                                                   "demo_rop_case_c1", case_c1_program, 1, 11, 3, 1,
                                                   case_c1_call_targets, {});
-    const sim::core::ExecResult case_c2 = RunCase("CASE_C2_L1_ROP_WINDOW_OOB", &gateway, &hardware,
+    const sim::core::ExecResult case_c2 = RunCase("CASE_C2_L1_ROP_WINDOW_OOB", &process_table, &hardware,
                                                   "demo_rop_case_c2", case_c2_program, 1, 11, 4, 1,
                                                   case_c2_call_targets, {});
 

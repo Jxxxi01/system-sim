@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "security/hardware.hpp"
+#include "security/securir_package.hpp"
 
 namespace sim::security {
 
@@ -16,7 +17,7 @@ class Gateway {
  public:
   explicit Gateway(SecurityHardware& hardware);
 
-  ContextHandle Load(const std::string& json);
+  GatewayLoadResult Load(SecureIrPackage package);
   void Release(ContextHandle handle);
   std::optional<std::uint32_t> GetUserIdForHandle(ContextHandle handle) const;
 

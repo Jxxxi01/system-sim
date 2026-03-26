@@ -7,10 +7,12 @@
 
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
+#include "kernel/process.hpp"
 #include "security/audit.hpp"
 #include "security/code_codec.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
+#include "security/securir_package.hpp"
 
 namespace {
 
@@ -69,12 +71,13 @@ start:
 
     sim::security::SecurityHardware hardware;
     sim::security::Gateway gateway(hardware);
+    sim::kernel::KernelProcessTable process_table(gateway, hardware, hardware.GetAuditCollector());
 
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle allow_handle =
-        gateway.Load(MakeSecureIrJson("demo_normal_allow", 1, base_va, end_va, 11, 1, "stub-valid"));
-    hardware.StoreCodeRegion(allow_handle, base_va, code_memory);
-    hardware.SetActiveHandle(allow_handle);
+        process_table.LoadProcess({MakeSecureIrJson("demo_normal_allow", 1, base_va, end_va, 11, 1, "stub-valid"),
+                                   code_memory});
+    process_table.ContextSwitch(allow_handle);
 
     sim::core::ExecuteOptions allow_options;
     allow_options.hardware = &hardware;
@@ -86,9 +89,9 @@ start:
 
     hardware.GetAuditCollector().Clear();
     const sim::security::ContextHandle wrong_key_handle =
-        gateway.Load(MakeSecureIrJson("demo_normal_wrong_key", 1, base_va, end_va, 99, 2, "stub-valid"));
-    hardware.StoreCodeRegion(wrong_key_handle, base_va, code_memory);
-    hardware.SetActiveHandle(wrong_key_handle);
+        process_table.LoadProcess(
+            {MakeSecureIrJson("demo_normal_wrong_key", 1, base_va, end_va, 99, 2, "stub-valid"), code_memory});
+    process_table.ContextSwitch(wrong_key_handle);
 
     sim::core::ExecuteOptions wrong_key_options;
     wrong_key_options.hardware = &hardware;

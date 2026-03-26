@@ -10,6 +10,7 @@
 #include "security/audit.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
+#include "security/securir_package.hpp"
 
 namespace sim::kernel {
 
@@ -25,7 +26,7 @@ class KernelProcessTable {
   KernelProcessTable(sim::security::Gateway& gateway, sim::security::SecurityHardware& hardware,
                      sim::security::AuditCollector& audit);
 
-  sim::security::ContextHandle LoadProcess(const std::string& secureir_json, std::vector<std::uint8_t> code_memory);
+  sim::security::ContextHandle LoadProcess(sim::security::SecureIrPackage package);
   void ReleaseProcess(sim::security::ContextHandle handle);
   void ContextSwitch(sim::security::ContextHandle handle);
 

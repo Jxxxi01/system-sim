@@ -61,6 +61,10 @@ bool Contains(const std::string& text, const std::string& needle) {
   return text.find(needle) != std::string::npos;
 }
 
+sim::security::SecureIrPackage MakePackage(const std::string& metadata, std::vector<std::uint8_t> code_memory = {}) {
+  return sim::security::SecureIrPackage{metadata, code_memory};
+}
+
 RunArtifacts RunProgramWithPolicy(const std::string& source, std::uint64_t base_va, std::uint32_t user_id,
                                   std::uint32_t key_id, std::uint32_t cfi_level,
                                   const std::string& call_targets_json, const std::string& jmp_targets_json,
@@ -73,10 +77,12 @@ RunArtifacts RunProgramWithPolicy(const std::string& source, std::uint64_t base_
   sim::security::SecurityHardware hardware;
   sim::security::Gateway gateway(hardware);
   const sim::security::ContextHandle handle =
-      gateway.Load(MakeSecureIrJson("spe_case", user_id, "stub-valid", base_va,
-                                    MakeCodeWindowJson(1, base_va, end_va, key_id), cfi_level,
-                                    call_targets_json, jmp_targets_json));
-  hardware.StoreCodeRegion(handle, base_va, code_memory);
+      gateway
+          .Load(MakePackage(MakeSecureIrJson("spe_case", user_id, "stub-valid", base_va,
+                                            MakeCodeWindowJson(1, base_va, end_va, key_id), cfi_level,
+                                            call_targets_json, jmp_targets_json),
+                            code_memory))
+          .handle;
   hardware.SetActiveHandle(handle);
   if (clear_audit_after_load) {
     hardware.GetAuditCollector().Clear();
@@ -206,9 +212,12 @@ SIM_TEST(Gateway_PropagatesPolicyIntoSpeTable) {
   sim::security::SecurityHardware hardware;
   sim::security::Gateway gateway(hardware);
   const std::uint64_t base = 0x2600;
-  const sim::security::ContextHandle handle = gateway.Load(MakeSecureIrJson(
-      "policy", 21, "sig", base, MakeCodeWindowJson(1, base, base + 16, 23), 3,
-      NumberArrayJson({base + 12}), NumberArrayJson({base + 20})));
+  const sim::security::ContextHandle handle =
+      gateway
+          .Load(MakePackage(MakeSecureIrJson("policy", 21, "sig", base,
+                                            MakeCodeWindowJson(1, base, base + 16, 23), 3,
+                                            NumberArrayJson({base + 12}), NumberArrayJson({base + 20}))))
+          .handle;
 
   hardware.GetAuditCollector().Clear();
   const sim::security::SpeCheckResult call_ok =
@@ -280,9 +289,9 @@ SIM_TEST(Gateway_Rollback_ClearsEwcAndSpeState) {
   const std::uint64_t base = 0x2900;
 
   try {
-    static_cast<void>(gateway.Load(MakeSecureIrJson("rollback", 44, "sig", base,
-                                                    MakeCodeWindowJson(1, base, base + 8, 31), 99,
-                                                    NumberArrayJson({}), NumberArrayJson({}))));
+    static_cast<void>(gateway.Load(MakePackage(MakeSecureIrJson("rollback", 44, "sig", base,
+                                                                MakeCodeWindowJson(1, base, base + 8, 31), 99,
+                                                                NumberArrayJson({}), NumberArrayJson({})))));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "spe_invalid_cfi_level"));
