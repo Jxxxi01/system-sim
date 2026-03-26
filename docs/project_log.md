@@ -2164,4 +2164,9 @@ Issue 11 分 A/B 两阶段：
 #### 4. 已知限制 & 下一步建议
 - 当前 `Gateway` 对 code size 的判断优先使用真实序列化后的 `code_memory`，对手写测试包则回退到 window span；这兼容了当前原型与测试，但长期更稳妥的做法仍是让 SecureIR 明确携带 code size 或 segment layout，避免双路径推导。
 - `saved_pc` 目前是“每次调用 `ExecuteProgram()` 的启动 PC”，还没有建模“执行中断后恢复到上次运行现场”的语义；如果后续需要模拟 preemption / resume，需要额外区分 immutable `saved_pc` 与 runtime PC。
-- Demo 已全部适配 hidden entry，但没有把每个 demo 的 stdout 文案完全统一成“load address vs hidden entry”的术语；若后续继续打磨演示材料，可再统一输出措辞，避免把 `base_va` 误读为入口地址。
+- Demo 已全部适配 hidden entry，但没有把每个 demo 的 stdout 文案完全统一成”load address vs hidden entry”的术语；若后续继续打磨演示材料，可再统一输出措辞，避免把 `base_va` 误读为入口地址。
+
+### Push 状态
+**已推送：** 2026-03-27
+**分支：** issue-12-hidden-entry
+**提交：** issue 12: hidden entry / saved_PC — OS can no longer specify startup PC
