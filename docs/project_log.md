@@ -2027,6 +2027,5 @@ Issue 11 分 A/B 两阶段：
 - metadata JSON 仍是手工串接输出，字段集继续扩展时需要同步补齐转义和测试覆盖。
 
 ### Push 状态
-- 分支：`issue-11-secureir-gen`
-- 未推送
-- 日期：2026-03-26
+**已推送：** 2026-03-26
+**分支：** issue-11-secureir-gen
