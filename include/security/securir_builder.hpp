@@ -28,6 +28,7 @@ struct SecureIrBuilderConfig {
   std::string program_name;
   std::uint32_t user_id = 0;
   std::uint32_t key_id = 0;
+  std::uint64_t entry_offset = 0;
   std::uint32_t window_id = 1;
   std::uint32_t code_policy_id = 1;
   std::string signature = "stub-valid";

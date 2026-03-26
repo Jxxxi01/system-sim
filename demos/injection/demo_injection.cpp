@@ -24,10 +24,10 @@ void PrintArtifacts(const sim::core::ExecResult& result, const sim::security::Au
   }
 }
 
-sim::core::ExecResult RunProgram(sim::security::SecurityHardware* hardware, std::uint64_t base_va) {
+sim::core::ExecResult RunProgram(sim::security::SecurityHardware* hardware) {
   sim::core::ExecuteOptions options;
   options.hardware = hardware;
-  return sim::core::ExecuteProgram(base_va, options);
+  return sim::core::ExecuteProgram(options);
 }
 
 void XorWholeCiphertext(sim::security::SecurityHardware* hardware, sim::security::ContextHandle handle,
@@ -93,7 +93,7 @@ start:
     const sim::security::ContextHandle baseline_handle =
         process_table.LoadProcess(build_package("demo_injection_case_a", 1));
     process_table.ContextSwitch(baseline_handle);
-    const sim::core::ExecResult baseline_result = RunProgram(&hardware, base_va);
+    const sim::core::ExecResult baseline_result = RunProgram(&hardware);
     std::cout << "[CASE_A_BASELINE]\n";
     sim::core::PrintRunSummary(baseline_result, std::cout);
     PrintArtifacts(baseline_result, hardware.GetAuditCollector());
@@ -103,7 +103,7 @@ start:
         process_table.LoadProcess(build_package("demo_injection_case_b", 2));
     process_table.ContextSwitch(full_tamper_handle);
     XorWholeCiphertext(&hardware, full_tamper_handle, 0xFFu);
-    const sim::core::ExecResult full_tamper_result = RunProgram(&hardware, base_va);
+    const sim::core::ExecResult full_tamper_result = RunProgram(&hardware);
     std::cout << "[CASE_B_FULL_TAMPER]\n";
     sim::core::PrintRunSummary(full_tamper_result, std::cout);
     PrintArtifacts(full_tamper_result, hardware.GetAuditCollector());
@@ -113,7 +113,7 @@ start:
         process_table.LoadProcess(build_package("demo_injection_case_c", 3));
     process_table.ContextSwitch(partial_tamper_handle);
     XorPayloadBytes(&hardware, partial_tamper_handle, 3, 0xAAu);
-    const sim::core::ExecResult partial_tamper_result = RunProgram(&hardware, base_va);
+    const sim::core::ExecResult partial_tamper_result = RunProgram(&hardware);
     std::cout << "[CASE_C_PARTIAL_TAMPER]\n";
     sim::core::PrintRunSummary(partial_tamper_result, std::cout);
     PrintArtifacts(partial_tamper_result, hardware.GetAuditCollector());

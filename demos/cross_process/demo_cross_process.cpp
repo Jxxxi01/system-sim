@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -58,10 +59,10 @@ const sim::security::AuditEvent* FindAuditEvent(const sim::security::AuditCollec
   return nullptr;
 }
 
-sim::core::ExecResult RunProgram(sim::security::SecurityHardware& hardware, std::uint64_t entry_pc) {
+sim::core::ExecResult RunProgram(sim::security::SecurityHardware& hardware) {
   sim::core::ExecuteOptions options;
   options.hardware = &hardware;
-  return sim::core::ExecuteProgram(entry_pc, options);
+  return sim::core::ExecuteProgram(options);
 }
 
 CaseAOutcome RunCaseA(const sim::isa::AsmProgram& alice_program, std::uint64_t alice_base_va) {
@@ -82,7 +83,7 @@ CaseAOutcome RunCaseA(const sim::isa::AsmProgram& alice_program, std::uint64_t a
   const sim::security::ContextHandle alice_handle =
       process_table.LoadProcess(sim::security::SecureIrBuilder::Build(alice_program, alice_config));
   process_table.ContextSwitch(alice_handle);
-  const sim::core::ExecResult result = RunProgram(hardware, alice_base_va);
+  const sim::core::ExecResult result = RunProgram(hardware);
 
   std::cout << "[CASE_A_NORMAL]\n";
   sim::core::PrintRunSummary(result, std::cout);
@@ -152,8 +153,8 @@ sim::core::ExecResult RunCaseC(const sim::isa::AsmProgram& alice_program, std::u
   alice_config.user_id = 1001;
   alice_config.key_id = 11;
   alice_config.window_id = 1;
-  const std::vector<std::uint8_t> alice_code_memory =
-      sim::security::SecureIrBuilder::Build(alice_program, alice_config).code_memory;
+  static_cast<void>(alice_program);
+  static_cast<void>(alice_config);
 
   sim::security::SecureIrBuilderConfig bob_config;
   bob_config.program_name = "bob_case_c";
@@ -164,15 +165,27 @@ sim::core::ExecResult RunCaseC(const sim::isa::AsmProgram& alice_program, std::u
   const sim::security::ContextHandle bob_handle =
       process_table.LoadProcess(sim::security::SecureIrBuilder::Build(bob_program, bob_config));
 
-  hardware.StoreCodeRegion(bob_handle, alice_base_va, alice_code_memory);
+  std::ostringstream bob_attack_source;
+  bob_attack_source << "J "
+                    << (static_cast<std::int64_t>(alice_base_va) -
+                        static_cast<std::int64_t>(bob_base_va + sim::isa::kInstrBytes))
+                    << '\n'
+                    << "HALT\n";
+  const sim::isa::AsmProgram bob_attack_program = sim::isa::AssembleText(bob_attack_source.str(), bob_base_va);
+  const std::vector<std::uint8_t> bob_attack_code_memory =
+      sim::security::SecureIrBuilder::Build(bob_attack_program, bob_config).code_memory;
+
+  hardware.StoreCodeRegion(bob_handle, bob_base_va, bob_attack_code_memory);
   process_table.ContextSwitch(bob_handle);
-  const sim::core::ExecResult result = RunProgram(hardware, alice_base_va);
+  const sim::core::ExecResult result = RunProgram(hardware);
 
   std::cout << "[CASE_C_DEFENSE_IN_DEPTH]\n";
   sim::core::PrintRunSummary(result, std::cout);
   PrintArtifacts(result, audit);
-  std::cout << "CASE_C_NOTE=PVT can be bypassed by a malicious OS write, but EWC still denies fetch at alice_base_va."
-            << '\n';
+  std::cout
+      << "CASE_C_NOTE=PVT can be bypassed by a malicious OS write, but execution still starts from Bob saved_pc and "
+         "EWC denies the cross-process jump."
+      << '\n';
   std::cout << "CASE_C_NOTE_2=PVT and EWC are complementary independent enforcement layers.\n";
 
   return result;

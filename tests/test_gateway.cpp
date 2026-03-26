@@ -19,13 +19,14 @@ std::string MakeSecureIrJson(const std::string& program_name, std::uint32_t user
                              std::uint64_t base_va, const std::string& windows_json,
                              const std::string& pages_json = "[]", std::uint32_t cfi_level = 0,
                              const std::string& call_targets_json = "[]",
-                             const std::string& jmp_targets_json = "[]") {
+                             const std::string& jmp_targets_json = "[]", std::uint64_t entry_offset = 0) {
   std::ostringstream oss;
   oss << "{"
       << "\"program_name\":\"" << program_name << "\","
       << "\"user_id\":" << user_id << ","
       << "\"signature\":\"" << signature << "\","
       << "\"base_va\":" << base_va << ","
+      << "\"entry_offset\":" << entry_offset << ","
       << "\"windows\":" << windows_json << ","
       << "\"pages\":" << pages_json << ","
       << "\"cfi_level\":" << cfi_level << ","
@@ -83,6 +84,9 @@ SIM_TEST(Gateway_Load_ValidSecureIR_ConfiguresEwcAndReturnsHandle) {
   const auto user_id = gateway.GetUserIdForHandle(handle);
   SIM_EXPECT_TRUE(user_id.has_value());
   SIM_EXPECT_EQ(user_id.value(), 7u);
+  const auto saved_pc = hardware.GetSavedPcForHandle(handle);
+  SIM_EXPECT_TRUE(saved_pc.has_value());
+  SIM_EXPECT_EQ(saved_pc.value(), 4096u);
 
   const sim::security::EwcQueryResult query = hardware.GetEwcTable().Query(4096, handle);
   SIM_EXPECT_TRUE(query.allow);
@@ -98,6 +102,64 @@ SIM_TEST(Gateway_Load_ValidSecureIR_ConfiguresEwcAndReturnsHandle) {
   SIM_EXPECT_EQ(events[0].pc, 4096u);
   SIM_EXPECT_TRUE(Contains(events[0].detail, "program_name=demo"));
   SIM_EXPECT_TRUE(Contains(events[0].detail, "window_count=1"));
+}
+
+SIM_TEST(Gateway_Load_EntryOffset_PopulatesHiddenSavedPc) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  const std::uint64_t base_va = 0x1800;
+
+  const sim::security::GatewayLoadResult load_result =
+      gateway.Load({MakeSecureIrJson("entry_offset_demo", 8, "stub-valid", base_va,
+                                     MakeCodeWindowJson(1, base_va, base_va + 12, 7), "[]", 0, "[]", "[]", 4),
+                    {}});
+
+  SIM_EXPECT_EQ(load_result.base_va, base_va);
+  const auto saved_pc = hardware.GetSavedPcForHandle(load_result.handle);
+  SIM_EXPECT_TRUE(saved_pc.has_value());
+  SIM_EXPECT_EQ(saved_pc.value(), base_va + 4);
+}
+
+SIM_TEST(Gateway_Load_MisalignedEntryOffset_Fails) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  const std::uint64_t base_va = 0x1A00;
+
+  try {
+    static_cast<void>(gateway.Load({MakeSecureIrJson("misaligned_entry", 8, "stub-valid", base_va,
+                                                    MakeCodeWindowJson(1, base_va, base_va + 12, 7),
+                                                    "[]", 0, "[]", "[]", 2),
+                                    {}}));
+    SIM_EXPECT_TRUE(false);
+  } catch (const std::runtime_error& ex) {
+    SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_entry_offset"));
+    SIM_EXPECT_TRUE(Contains(ex.what(), "reason=misaligned"));
+    const auto& events = hardware.GetAuditCollector().GetEvents();
+    SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
+    SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_TRUE(Contains(events[0].detail, "reason=misaligned"));
+  }
+}
+
+SIM_TEST(Gateway_Load_OutOfRangeEntryOffset_Fails) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  const std::uint64_t base_va = 0x1C00;
+
+  try {
+    static_cast<void>(gateway.Load({MakeSecureIrJson("oob_entry", 9, "stub-valid", base_va,
+                                                    MakeCodeWindowJson(1, base_va, base_va + 8, 7),
+                                                    "[]", 0, "[]", "[]", 8),
+                                    {}}));
+    SIM_EXPECT_TRUE(false);
+  } catch (const std::runtime_error& ex) {
+    SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_entry_offset"));
+    SIM_EXPECT_TRUE(Contains(ex.what(), "reason=out_of_range"));
+    const auto& events = hardware.GetAuditCollector().GetEvents();
+    SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
+    SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_TRUE(Contains(events[0].detail, "reason=out_of_range"));
+  }
 }
 
 SIM_TEST(Gateway_Load_MultipleCalls_UniqueHandles) {
@@ -192,6 +254,7 @@ SIM_TEST(Gateway_Release_ClearsMappingWindowsAndDoesNotReuseHandle) {
   gateway.Release(handle_a);
 
   SIM_EXPECT_TRUE(!gateway.GetUserIdForHandle(handle_a).has_value());
+  SIM_EXPECT_TRUE(!hardware.GetSavedPcForHandle(handle_a).has_value());
   SIM_EXPECT_TRUE(hardware.GetCodeRegion(handle_a) == nullptr);
   const sim::security::EwcQueryResult released_query = hardware.GetEwcTable().Query(base_a, handle_a);
   SIM_EXPECT_TRUE(!released_query.allow);
@@ -324,7 +387,7 @@ SIM_TEST(AuditCollector_UnifiedEvents) {
 
   sim::core::ExecuteOptions options;
   options.hardware = &hardware;
-  const sim::core::ExecResult result = sim::core::ExecuteProgram(base, options);
+  const sim::core::ExecResult result = sim::core::ExecuteProgram(options);
 
   SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::DECRYPT_DECODE_FAIL);
   const auto& events = hardware.GetAuditCollector().GetEvents();

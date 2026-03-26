@@ -148,6 +148,7 @@ std::string BuildMetadataJson(const sim::isa::AsmProgram& program, const SecureI
       << "\"user_id\":" << config.user_id << ','
       << "\"signature\":\"" << EscapeJsonString(config.signature) << "\","
       << "\"base_va\":" << program.base_va << ','
+      << "\"entry_offset\":" << config.entry_offset << ','
       << "\"windows\":";
   AppendWindowArray(&oss, windows);
   oss << ',' << "\"pages\":";

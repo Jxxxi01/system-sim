@@ -61,10 +61,10 @@ sim::security::ContextHandle LoadProgram(sim::kernel::KernelProcessTable* proces
   return handle;
 }
 
-sim::core::ExecResult RunProgram(sim::security::SecurityHardware* hardware, std::uint64_t base_va) {
+sim::core::ExecResult RunProgram(sim::security::SecurityHardware* hardware) {
   sim::core::ExecuteOptions options;
   options.hardware = hardware;
-  return sim::core::ExecuteProgram(base_va, options);
+  return sim::core::ExecuteProgram(options);
 }
 
 sim::core::ExecResult RunCase(const char* label, sim::kernel::KernelProcessTable* process_table,
@@ -77,7 +77,7 @@ sim::core::ExecResult RunCase(const char* label, sim::kernel::KernelProcessTable
   audit.Clear();
   LoadProgram(process_table, program, program_name, user_id, key_id, window_id, cfi_level, call_targets, jmp_targets);
 
-  const sim::core::ExecResult result = RunProgram(hardware, program.base_va);
+  const sim::core::ExecResult result = RunProgram(hardware);
   std::cout << '[' << label << "]\n";
   sim::core::PrintRunSummary(result, std::cout);
   PrintArtifacts(result, audit);

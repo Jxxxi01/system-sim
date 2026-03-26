@@ -229,34 +229,42 @@ void LogAudit(sim::security::AuditCollector* audit, std::string type, std::uint3
   }
 }
 
-ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options) {
+ExecResult ExecuteProgram(const ExecuteOptions& options) {
   if (options.hardware == nullptr) {
     throw std::runtime_error("hardware_not_configured");
   }
 
   ExecResult result;
-  result.state.pc = entry_pc;
+  result.state.pc = 0;
   result.state.regs.fill(0);
   result.state.mem.assign(options.mem_size, 0);
 
   const std::optional<sim::security::ContextHandle> active_handle = options.hardware->GetActiveHandle();
   if (!active_handle.has_value()) {
     std::ostringstream oss;
-    oss << "invalid_pc reason=no_active_context pc=" << entry_pc;
-    result.trap = Trap{TrapReason::INVALID_PC, entry_pc, oss.str()};
-    return result;
-  }
-
-  const sim::security::CodeRegion* region = options.hardware->GetCodeRegion(*active_handle);
-  if (region == nullptr) {
-    std::ostringstream oss;
-    oss << "invalid_pc reason=missing_active_region pc=" << entry_pc
-        << " context_handle=" << *active_handle;
-    result.trap = Trap{TrapReason::INVALID_PC, entry_pc, oss.str()};
+    oss << "invalid_pc reason=no_active_context pc=0";
+    result.trap = Trap{TrapReason::INVALID_PC, 0, oss.str()};
     return result;
   }
 
   const sim::security::ContextHandle context_handle = *active_handle;
+  const sim::security::HandleMetadata* metadata = options.hardware->GetHandleMetadata(context_handle);
+  if (metadata == nullptr) {
+    std::ostringstream oss;
+    oss << "invalid_pc reason=missing_active_metadata pc=0 context_handle=" << context_handle;
+    result.trap = Trap{TrapReason::INVALID_PC, 0, oss.str()};
+    return result;
+  }
+
+  result.state.pc = metadata->saved_pc;
+  const sim::security::CodeRegion* region = options.hardware->GetCodeRegion(context_handle);
+  if (region == nullptr) {
+    std::ostringstream oss;
+    oss << "invalid_pc reason=missing_active_region pc=0 context_handle=" << context_handle;
+    result.trap = Trap{TrapReason::INVALID_PC, 0, oss.str()};
+    return result;
+  }
+
   sim::security::AuditCollector* audit = &options.hardware->GetAuditCollector();
   const sim::security::EwcTable& ewc = options.hardware->GetEwcTable();
   const std::uint64_t region_base_va = region->base_va;
@@ -275,7 +283,7 @@ ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options)
 
   {
     std::ostringstream oss;
-    oss << "context_handle=" << context_handle;
+    oss << "context_handle=" << context_handle << " saved_pc=" << metadata->saved_pc;
     result.context_trace.push_back(oss.str());
   }
 
@@ -295,7 +303,8 @@ ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options)
     if (!FetchStage(result.state.pc, ewc, context_handle, code_memory, code_memory_size, region_base_va, &fetched,
                     &fetch_trap, &deny_detail)) {
       if (!deny_detail.empty()) {
-        LogAudit(audit, "EWC_ILLEGAL_PC", 0, context_handle, fetch_trap.pc, std::move(deny_detail));
+        LogAudit(audit, "EWC_ILLEGAL_PC", metadata->user_id, context_handle, fetch_trap.pc,
+                 std::move(deny_detail));
       }
       result.trap = std::move(fetch_trap);
       break;

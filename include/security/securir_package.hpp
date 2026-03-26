@@ -21,7 +21,7 @@ struct GatewayPageLayout {
 struct GatewayLoadResult {
   ContextHandle handle = 0;
   std::uint32_t user_id = 0;
-  std::uint64_t base_va = 0;
+  std::uint64_t base_va = 0;  // Code load address for PVT registration, not the hidden entry.
   std::vector<GatewayPageLayout> pages;
 };
 

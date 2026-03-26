@@ -92,7 +92,7 @@ RunArtifacts RunProgramWithPolicy(const std::string& source, std::uint64_t base_
   options.hardware = &hardware;
 
   RunArtifacts artifacts;
-  artifacts.result = sim::core::ExecuteProgram(base_va, options);
+  artifacts.result = sim::core::ExecuteProgram(options);
   artifacts.audit_events = hardware.GetAuditCollector().GetEvents();
   return artifacts;
 }
@@ -244,22 +244,19 @@ SIM_TEST(ExecuteProgram_UsesHardwareOnlyPath) {
       sim::security::BuildCodeMemory(sim::security::EncryptProgram(program, 29));
 
   sim::security::SecurityHardware hardware;
-  sim::security::ExecWindow window;
-  window.window_id = 1;
-  window.start_va = base;
-  window.end_va = base + 4;
-  window.owner_user_id = 22;
-  window.key_id = 29;
-  window.type = sim::security::ExecWindowType::CODE;
-  window.permissions = sim::security::MemoryPermissions::RX;
-  window.code_policy_id = 1;
-  hardware.GetEwcTable().SetWindows(1, std::vector<sim::security::ExecWindow>{window});
-  hardware.StoreCodeRegion(1, base, code_memory);
-  hardware.SetActiveHandle(1);
+  sim::security::Gateway gateway(hardware);
+  const sim::security::ContextHandle handle =
+      gateway
+          .Load(MakePackage(MakeSecureIrJson("hardware_only", 22, "sig", base,
+                                            MakeCodeWindowJson(1, base, base + 4, 29), 0,
+                                            NumberArrayJson({}), NumberArrayJson({})),
+                            code_memory))
+          .handle;
+  hardware.SetActiveHandle(handle);
 
   sim::core::ExecuteOptions options;
   options.hardware = &hardware;
-  const sim::core::ExecResult result = sim::core::ExecuteProgram(base, options);
+  const sim::core::ExecResult result = sim::core::ExecuteProgram(options);
 
   SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
 }
@@ -314,7 +311,7 @@ SIM_TEST(Gateway_Rollback_ClearsEwcAndSpeState) {
 SIM_TEST(ExecuteProgram_NullHardware_Throws) {
   sim::core::ExecuteOptions options;
   try {
-    static_cast<void>(sim::core::ExecuteProgram(0x2A00, options));
+    static_cast<void>(sim::core::ExecuteProgram(options));
     SIM_EXPECT_TRUE(false);
   } catch (const std::runtime_error& ex) {
     SIM_EXPECT_EQ(std::string(ex.what()), std::string("hardware_not_configured"));

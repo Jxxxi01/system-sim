@@ -49,7 +49,7 @@ struct ExecuteOptions {
   sim::security::SecurityHardware* hardware = nullptr;
 };
 
-ExecResult ExecuteProgram(std::uint64_t entry_pc, const ExecuteOptions& options);
+ExecResult ExecuteProgram(const ExecuteOptions& options);
 
 const char* TrapReasonToString(TrapReason reason);
 void PrintRunSummary(const ExecResult& result, std::ostream& os);

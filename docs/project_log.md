@@ -2023,9 +2023,145 @@ Issue 11 分 A/B 两阶段：
 - `demo_normal` 的 wrong-key 演示实现方式与 Phase A 的抽象描述不同：由于 builder 现在显式阻止 metadata / key 配置不一致，最终采用交换 `code_memory` 的方式保留 `CASE_B`。这是实现层面的演示手法调整，不改变外部可观察行为。
 
 #### 5. 已知限制 & 下一步建议
-- 当前多窗口能力仍限定为“所有窗口共享同一 `key_id`”；多 key 分段加密依然不在本 Issue 范围内。
+- 当前多窗口能力仍限定为”所有窗口共享同一 `key_id`”；多 key 分段加密依然不在本 Issue 范围内。
 - metadata JSON 仍是手工串接输出，字段集继续扩展时需要同步补齐转义和测试覆盖。
 
 ### Push 状态
 **已推送：** 2026-03-26
 **分支：** issue-11-secureir-gen
+
+## Issue 12：Hidden entry / saved_PC
+**日期：** 2026-03-26
+**分支：** issue-12-hidden-entry
+**状态：** Phase A 方案已确认
+
+### Phase A：计划冻结
+
+#### 目标
+将程序首次入口隐藏于硬件上下文中，OS 不再显式指定启动 PC。首次执行只能从 Gateway 在 Load 时初始化的 `saved_pc` 开始。同时将 `user_id` 从 Gateway 私有映射迁移到 SecurityHardware per-handle 元数据中（其设计归属位置）。
+
+#### 安全动机
+对齐 v4 的 hidden-entry 语义。当前 `ExecuteProgram` 接受外部显式传入的 `entry_pc`，OS 可以指定任意入口地址绕过安全初始化路径。
+
+#### 文件范围
+- 修改 `include/security/hardware.hpp`：per-handle 元数据扩展（saved_pc + user_id），新增独立的写入接口（仅由 Gateway 调用），saved_pc 不放入 CodeRegion（CodeRegion 返回可写指针，会破坏隐藏性）
+- 修改 `include/security/gateway.hpp` / `src/security/gateway.cpp`：Load 时写入 saved_pc + user_id 到 SecurityHardware；移除 `handle_to_user_` 私有映射，`GetUserIdForHandle` 改为代理查询 SecurityHardware；Release 和回滚路径同步清理新元数据
+- 修改 `include/security/securir_package.hpp`：`GatewayLoadResult.base_va` 语义重定义为 code load address（供 PVT 页面注册），不再作为 entry point
+- 修改 `include/security/securir_builder.hpp` / `src/security/securir_builder.cpp`：Builder config 新增 entry offset 字段（默认 0），支持 entry != base_va
+- 修改 SecureIR metadata 格式（Gateway 解析侧）：解析 entry offset 字段
+- 修改 `include/core/executor.hpp` / `src/core/executor.cpp`：`ExecuteProgram` 移除 `entry_pc` 参数，从 active context 的硬件状态读取 saved_pc
+- 修改 `include/kernel/process.hpp` / `src/kernel/process.cpp`：适配新接口，`ProcessContext.base_va` 语义明确为 load address
+- 修改 5 个 demo（normal / injection / cross_user / cross_process / rop）：适配新接口，不再传 entry_pc
+- 修改相关测试文件：适配新接口 + 新增恶意 OS 测试
+
+#### 语义接口
+
+**SecurityHardware per-handle 元数据**：
+- 每个 handle 关联 saved_pc 和 user_id，仅由 Gateway 在 Load 时写入
+- 独立于 CodeRegion 存储——CodeRegion 保持现有语义（code_memory 可被攻击场景修改），saved_pc 不可被外部篡改
+- Release 时同步清理
+
+**Gateway**：
+- `Load()` 计算 `saved_pc = base_va + entry_offset`，写入 SecurityHardware per-handle 元数据
+- `handle_to_user_` 移除，`GetUserIdForHandle()` 保留接口但改为查询 SecurityHardware
+- 容量检查适配新的数据来源
+
+**SecureIR / SecureIrBuilder**：
+- metadata 格式新增 entry_offset 字段
+- Builder config 新增 entry_offset（默认 0，保持向后兼容）
+- `saved_pc = base_va + entry_offset`
+
+**ExecuteProgram**：
+- 移除 `entry_pc` 参数，签名变为 `ExecuteProgram(const ExecuteOptions&)`
+- 从 active context 的 saved_pc 读取首次入口
+- 错误路径（no_active_context / missing_active_region）的 trap PC 填 0
+
+**GatewayLoadResult**：
+- `base_va` 保留，语义为 code load address（供 PVT 页面注册使用）
+- 不暴露 entry 信息
+
+**cross_user demo CASE_C**：
+- 改写为新 API 下的攻击演示：Bob ContextSwitch 后调 ExecuteProgram → 从 Bob 自己的 saved_pc 启动 → Bob 代码中跳转到 Alice 地址 → EWC 拦截
+- 攻击面从”OS 指定 entry_pc”变为”用户代码越界跳转”，叙事仍为跨用户隔离
+
+#### 不变量
+1. saved_pc 只由 Gateway 在 Load 时写入，无外部写入 API
+2. user_id 的权威来源是 SecurityHardware per-handle 元数据（符合设计文档：安全上下文中包含 user_id）
+3. ExecuteProgram 不接受外部指定的入口地址
+4. GatewayLoadResult 不暴露 entry 信息
+
+#### 测试目标
+1. 正常路径：Gateway load → ContextSwitch → ExecuteProgram → 从 saved_pc 启动 → HALT
+2. Entry offset：非零 entry_offset → saved_pc != base_va → 正确执行
+3. 恶意 OS：外部无法通过 API 指定任意首次入口（新增测试用例，放在 test_executor.cpp）
+4. cross_user CASE_C：Bob 从自己的 saved_pc 启动，代码越界跳转被 EWC 拦截
+5. 回归：全部现有测试继续通过
+
+#### 设计决策记录
+
+**D-1：saved_pc 独立于 CodeRegion 存储**
+- 决策：在 SecurityHardware 中新增独立的 per-handle 元数据结构，不扩展 CodeRegion。
+- 原因：CodeRegion 通过 GetCodeRegion() 返回可写指针，demo_injection 和 cross_process 直接修改它。如果 saved_pc 放入 CodeRegion，恶意 OS 路径可篡改入口，违背安全目标。
+
+**D-2：Gateway handle_to_user_ 直接移除**
+- 决策：移除 Gateway 的 handle_to_user_ 私有映射，GetUserIdForHandle 改为代理查询 SecurityHardware。
+- 原因：user_id 按设计文档应存于硬件安全上下文。保留两份是冗余的双真值源。Gateway 持有 SecurityHardware& 引用，查询代价为零。
+
+**D-3：本轮新增 entry_offset**
+- 决策：SecureIR metadata 和 SecureIrBuilder 新增 entry_offset 字段，saved_pc = base_va + entry_offset。
+- 原因：仅做 saved_pc == base_va 不足以完整展示 hidden entry 的表达能力。entry_offset 默认 0 保持向后兼容。
+
+**D-4：错误路径 trap PC 填 0**
+- 决策：ExecuteProgram 在 no_active_context / missing_active_region 时 trap.pc = 0。
+- 原因：这些错误发生时尚未从硬件读取到有效 PC，0 作为”PC 未知”的 sentinel。
+
+#### Codex 可行性评估摘要（Step 2）
+- session_id: 019d297e-c329-73e3-894f-b44b3bfc5a36
+- 总体判断：方案可行，改动量中等，无硬阻塞
+- ExecuteProgram 调用点共 16 处（5 demo + 4 测试文件）
+- GatewayLoadResult.base_va 当前无生产路径直接用作 entry_pc，语义重定义影响低
+- ProcessContext.base_va 仅用于审计和 PVT，不参与执行入口选择
+- 风险已在 Step 3 讨论中逐条解决并形成 D-1 至 D-4 决策
+
+### Phase B：实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+
+#### 1. 变更文件清单
+- 修改 `include/security/hardware.hpp`：新增 `HandleMetadata{saved_pc,user_id}`、硬件侧只读查询接口，以及仅供 `Gateway` 调用的元数据写入/清理路径；`SetActiveHandle()` 现在要求 handle 同时具备 code region 和 metadata。
+- 修改 `include/core/executor.hpp`：`ExecuteProgram` 签名收敛为 `ExecuteProgram(const ExecuteOptions&)`，移除外部 `entry_pc` 输入。
+- 修改 `include/security/gateway.hpp`：删除 `handle_to_user_` 私有映射依赖，保留 `GetUserIdForHandle()` 但语义改为代理查询硬件。
+- 修改 `include/security/securir_builder.hpp`：`SecureIrBuilderConfig` 新增 `entry_offset` 字段，默认值为 0。
+- 修改 `include/security/securir_package.hpp`：明确 `GatewayLoadResult.base_va` 只是 code load address，不再承担 entry point 语义。
+- 修改 `src/core/executor.cpp`：执行入口改为从 active handle 的 `saved_pc` 读取；`no_active_context` / `missing_active_region` trap 的 `pc` 统一填 0；`EWC_ILLEGAL_PC` 审计改为使用硬件中的 `user_id`。
+- 修改 `src/security/gateway.cpp`：解析 `entry_offset`，计算并写入 `saved_pc`，移除 Gateway 自身的 user 映射；`Release()` / load 失败回滚会同步清理 metadata；后续补入 `entry_offset` 的 load-time 对齐与越界校验。
+- 修改 `src/security/securir_builder.cpp`：metadata JSON 新增 `entry_offset` 输出，支持 hidden entry round-trip。
+- 修改 `demos/normal/demo_normal.cpp`：移除显式 entry 参数，统一从 active context 的 `saved_pc` 启动。
+- 修改 `demos/injection/demo_injection.cpp`：同上，攻击演示仍通过篡改 `code_memory` 完成，但启动入口改为 hidden entry。
+- 修改 `demos/rop/demo_rop.cpp`：同上，所有 ROP case 从 hardware-saved `saved_pc` 启动。
+- 修改 `demos/cross_user/demo_cross_user.cpp`：移除外部 entry 传参；CASE_C 改为 Bob 使用非零 `entry_offset` 的 hidden entry 启动，再跳向 Alice 地址触发 EWC。
+- 修改 `demos/cross_process/demo_cross_process.cpp`：移除外部 entry 传参；CASE_C 改为恶意 OS 覆写 Bob 的 code region，但执行仍从 Bob 自己的 `saved_pc` 起跑，再由 EWC 拦截跨进程跳转。
+- 修改 `tests/test_executor.cpp`：重构 helper，统一通过 Gateway 建立硬件 metadata；适配无 `entry_pc` 接口；新增“非零 `entry_offset` 正确执行”和“恶意 OS 无法指定首次入口”用例；运行期坏 PC 用例改为真正的执行期跳转错误。
+- 修改 `tests/test_gateway.cpp`：适配 `entry_offset` 字段与 hidden entry 语义；新增 `saved_pc` 写入/清理校验；新增 misaligned / out-of-range `entry_offset` 在 Load 阶段被拒绝的回归。
+- 修改 `tests/test_securir_builder.cpp`：新增 builder + `entry_offset` 的 round-trip 测试，验证从 metadata 到 Gateway 再到 Executor 的 hidden entry 链路。
+- 修改 `tests/test_spe.cpp`：将 1 条直接手工构造硬件状态的执行测试改为先走 Gateway Load，确保 metadata 初始化符合新语义。
+- 修改 `docs/project_log.md`：追加本次 Issue 12 的实现复盘。
+
+#### 2. 测试与运行
+- 已执行命令：
+  - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+  - `cmake --build build`
+  - `ctest --test-dir build`
+- 结果：
+  - 8 个 test suites 全绿，`100% tests passed, 0 tests failed out of 8`
+  - hidden entry、`entry_offset`、Gateway metadata 回滚/释放、cross-user hidden-entry 叙事相关回归均已覆盖
+
+#### 3. 与 Phase A 方案的偏差
+- `include/kernel/process.hpp` / `src/kernel/process.cpp` 最终未发生代码改动。Phase A 里预估需要适配 `ProcessContext.base_va` 语义，但现有实现本身只把 `base_va` 当 load address 使用，不参与入口选择，因此无需实际修改。
+- 实现阶段新增了一项 Phase A 中未单列的收口：`Gateway::Load()` 对 `entry_offset` 增加了 load-time 校验（必须按 `kInstrBytes` 对齐，且必须落在代码范围内），把原本可能推迟到运行期的问题前移为配置错误。
+- `test_executor.cpp` 中原有一条“通过非法起始 PC 触发运行期 misaligned trap”的旧断言不再成立；在 hidden-entry 语义下，这类非法首次入口现在会被 Gateway 在 Load 阶段拒绝，因此测试改写为执行期 `J` 指令把 PC 跳坏，以继续覆盖运行期 `INVALID_PC` 行为。
+
+#### 4. 已知限制 & 下一步建议
+- 当前 `Gateway` 对 code size 的判断优先使用真实序列化后的 `code_memory`，对手写测试包则回退到 window span；这兼容了当前原型与测试，但长期更稳妥的做法仍是让 SecureIR 明确携带 code size 或 segment layout，避免双路径推导。
+- `saved_pc` 目前是“每次调用 `ExecuteProgram()` 的启动 PC”，还没有建模“执行中断后恢复到上次运行现场”的语义；如果后续需要模拟 preemption / resume，需要额外区分 immutable `saved_pc` 与 runtime PC。
+- Demo 已全部适配 hidden entry，但没有把每个 demo 的 stdout 文案完全统一成“load address vs hidden entry”的术语；若后续继续打磨演示材料，可再统一输出措辞，避免把 `base_va` 误读为入口地址。

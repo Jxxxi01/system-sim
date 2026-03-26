@@ -59,7 +59,7 @@ start:
 
     sim::core::ExecuteOptions allow_options;
     allow_options.hardware = &hardware;
-    const sim::core::ExecResult allow_result = sim::core::ExecuteProgram(base_va, allow_options);
+    const sim::core::ExecResult allow_result = sim::core::ExecuteProgram(allow_options);
 
     std::cout << "[CASE_A_ALLOW]\n";
     sim::core::PrintRunSummary(allow_result, std::cout);
@@ -81,7 +81,7 @@ start:
 
     sim::core::ExecuteOptions wrong_key_options;
     wrong_key_options.hardware = &hardware;
-    const sim::core::ExecResult wrong_key_result = sim::core::ExecuteProgram(base_va, wrong_key_options);
+    const sim::core::ExecResult wrong_key_result = sim::core::ExecuteProgram(wrong_key_options);
     std::cout << "[CASE_B_WRONG_KEY]\n";
     sim::core::PrintRunSummary(wrong_key_result, std::cout);
     PrintArtifacts(wrong_key_result, hardware.GetAuditCollector());

@@ -130,9 +130,40 @@ SIM_TEST(SecureIrBuilder_RoundTrip_ExecuteHalts) {
 
   sim::core::ExecuteOptions options;
   options.hardware = &hardware;
-  const sim::core::ExecResult result = sim::core::ExecuteProgram(base_va, options);
+  const sim::core::ExecResult result = sim::core::ExecuteProgram(options);
 
   SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
+}
+
+SIM_TEST(SecureIrBuilder_EntryOffset_RoundTripUsesSavedPc) {
+  const std::uint64_t base_va = 0x4300;
+  const std::string source = R"(
+  LI x1, 77
+  LI x2, 9
+  HALT
+)";
+  const sim::isa::AsmProgram program = sim::isa::AssembleText(source, base_va);
+
+  sim::security::SecureIrBuilderConfig config;
+  config.program_name = "builder_entry_offset";
+  config.user_id = 18;
+  config.key_id = 25;
+  config.window_id = 4;
+  config.entry_offset = sim::isa::kInstrBytes;
+
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  const sim::security::GatewayLoadResult load_result =
+      gateway.Load(sim::security::SecureIrBuilder::Build(program, config));
+  hardware.SetActiveHandle(load_result.handle);
+
+  sim::core::ExecuteOptions options;
+  options.hardware = &hardware;
+  const sim::core::ExecResult result = sim::core::ExecuteProgram(options);
+
+  SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
+  SIM_EXPECT_EQ(result.state.regs[1], 0u);
+  SIM_EXPECT_EQ(result.state.regs[2], 9u);
 }
 
 SIM_TEST(SecureIrBuilder_MultiWindow_NonOverlappingLoadSucceeds) {
@@ -214,7 +245,7 @@ SIM_TEST(SecureIrBuilder_MultiWindow_RoundTrip_ExecuteHalts) {
 
   sim::core::ExecuteOptions options;
   options.hardware = &hardware;
-  const sim::core::ExecResult result = sim::core::ExecuteProgram(base_va, options);
+  const sim::core::ExecResult result = sim::core::ExecuteProgram(options);
 
   SIM_EXPECT_EQ(result.trap.reason, sim::core::TrapReason::HALT);
 }

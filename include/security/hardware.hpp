@@ -15,9 +15,16 @@
 
 namespace sim::security {
 
+class Gateway;
+
 struct CodeRegion {
   std::uint64_t base_va = 0;
   std::vector<std::uint8_t> code_memory;
+};
+
+struct HandleMetadata {
+  std::uint64_t saved_pc = 0;
+  std::uint32_t user_id = 0;
 };
 
 class SecurityHardware {
@@ -39,17 +46,27 @@ class SecurityHardware {
   void StoreCodeRegion(ContextHandle handle, std::uint64_t base_va, std::vector<std::uint8_t> code_memory);
   CodeRegion* GetCodeRegion(ContextHandle handle);
   const CodeRegion* GetCodeRegion(ContextHandle handle) const;
+  const HandleMetadata* GetHandleMetadata(ContextHandle handle) const;
+  std::optional<std::uint64_t> GetSavedPcForHandle(ContextHandle handle) const;
+  std::optional<std::uint32_t> GetUserIdForHandle(ContextHandle handle) const;
+  std::size_t GetLoadedHandleCount() const;
   void RemoveCodeRegion(ContextHandle handle);
   void SetActiveHandle(ContextHandle handle);
   std::optional<ContextHandle> GetActiveHandle() const;
   void ClearActiveHandle();
 
  private:
+  friend class Gateway;
+
+  void StoreHandleMetadata(ContextHandle handle, std::uint64_t saved_pc, std::uint32_t user_id);
+  void RemoveHandleMetadata(ContextHandle handle);
+
   EwcTable ewc_table_;
   AuditCollector audit_collector_;
   SpeTable spe_table_;
   PvtTable pvt_table_;
   std::unordered_map<ContextHandle, CodeRegion> code_regions_;
+  std::unordered_map<ContextHandle, HandleMetadata> handle_metadata_;
   std::optional<ContextHandle> active_handle_;
 };
 
@@ -95,10 +112,42 @@ inline const CodeRegion* SecurityHardware::GetCodeRegion(ContextHandle handle) c
   return &it->second;
 }
 
+inline const HandleMetadata* SecurityHardware::GetHandleMetadata(ContextHandle handle) const {
+  auto it = handle_metadata_.find(handle);
+  if (it == handle_metadata_.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+inline std::optional<std::uint64_t> SecurityHardware::GetSavedPcForHandle(ContextHandle handle) const {
+  const HandleMetadata* metadata = GetHandleMetadata(handle);
+  if (metadata == nullptr) {
+    return std::nullopt;
+  }
+  return metadata->saved_pc;
+}
+
+inline std::optional<std::uint32_t> SecurityHardware::GetUserIdForHandle(ContextHandle handle) const {
+  const HandleMetadata* metadata = GetHandleMetadata(handle);
+  if (metadata == nullptr) {
+    return std::nullopt;
+  }
+  return metadata->user_id;
+}
+
+inline std::size_t SecurityHardware::GetLoadedHandleCount() const { return handle_metadata_.size(); }
+
 inline void SecurityHardware::RemoveCodeRegion(ContextHandle handle) { code_regions_.erase(handle); }
 
+inline void SecurityHardware::StoreHandleMetadata(ContextHandle handle, std::uint64_t saved_pc, std::uint32_t user_id) {
+  handle_metadata_[handle] = HandleMetadata{saved_pc, user_id};
+}
+
+inline void SecurityHardware::RemoveHandleMetadata(ContextHandle handle) { handle_metadata_.erase(handle); }
+
 inline void SecurityHardware::SetActiveHandle(ContextHandle handle) {
-  if (GetCodeRegion(handle) == nullptr) {
+  if (GetCodeRegion(handle) == nullptr || GetHandleMetadata(handle) == nullptr) {
     throw std::runtime_error("security_hardware_invalid_active_handle");
   }
   active_handle_ = handle;

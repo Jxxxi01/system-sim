@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "isa/instr.hpp"
+#include "security/code_codec.hpp"
 #include "security/ewc.hpp"
 
 namespace sim::security {
@@ -246,6 +248,7 @@ struct SecureIr {
   std::uint32_t user_id = 0;
   std::string signature;
   std::uint64_t base_va = 0;
+  std::uint64_t entry_offset = 0;
   std::vector<SecureIrWindow> windows;
   std::vector<GatewayPageLayout> pages;
   std::uint32_t cfi_level = 0;
@@ -317,6 +320,14 @@ std::string RequireStringField(const JsonValue::Object& object, const char* name
   return RequireString(RequireField(object, name), name);
 }
 
+std::uint64_t OptionalU64Field(const JsonValue::Object& object, const char* name, std::uint64_t default_value) {
+  auto it = object.find(name);
+  if (it == object.end()) {
+    return default_value;
+  }
+  return RequireNumber(it->second, name);
+}
+
 PvtPageType ParsePageType(const std::string& value) {
   if (value == "CODE") {
     return PvtPageType::CODE;
@@ -348,6 +359,7 @@ SecureIr ParseSecureIr(const std::string& json) {
   secure_ir.user_id = RequireU32Field(object, "user_id");
   secure_ir.signature = RequireStringField(object, "signature");
   secure_ir.base_va = RequireU64Field(object, "base_va");
+  secure_ir.entry_offset = OptionalU64Field(object, "entry_offset", 0);
   secure_ir.cfi_level = RequireU32Field(object, "cfi_level");
 
   const JsonValue::Array& windows = RequireArray(RequireField(object, "windows"), "windows");
@@ -399,6 +411,52 @@ std::string MakeReleaseDetail(bool released) {
   return oss.str();
 }
 
+std::uint64_t ComputeSavedPc(std::uint64_t base_va, std::uint64_t entry_offset) {
+  const unsigned __int128 saved_pc =
+      static_cast<unsigned __int128>(base_va) + static_cast<unsigned __int128>(entry_offset);
+  const unsigned __int128 max_u64 = static_cast<unsigned __int128>(std::numeric_limits<std::uint64_t>::max());
+  if (saved_pc > max_u64) {
+    throw std::runtime_error("gateway_saved_pc_overflow");
+  }
+  return static_cast<std::uint64_t>(saved_pc);
+}
+
+std::uint64_t ResolveCodeSize(const SecureIr& secure_ir, const SecureIrPackage& package) {
+  if (!package.code_memory.empty() && (package.code_memory.size() % sim::security::kCipherUnitBytes) == 0) {
+    const unsigned __int128 unit_count =
+        static_cast<unsigned __int128>(package.code_memory.size() / sim::security::kCipherUnitBytes);
+    const unsigned __int128 code_size = unit_count * static_cast<unsigned __int128>(sim::isa::kInstrBytes);
+    const unsigned __int128 max_u64 = static_cast<unsigned __int128>(std::numeric_limits<std::uint64_t>::max());
+    if (code_size > max_u64) {
+      throw std::runtime_error("gateway_code_size_overflow");
+    }
+    return static_cast<std::uint64_t>(code_size);
+  }
+
+  std::uint64_t max_end_va = secure_ir.base_va;
+  for (const SecureIrWindow& window : secure_ir.windows) {
+    if (window.end_va > max_end_va) {
+      max_end_va = window.end_va;
+    }
+  }
+  return max_end_va - secure_ir.base_va;
+}
+
+void ValidateEntryOffset(std::uint64_t entry_offset, std::uint64_t code_size) {
+  if ((entry_offset % sim::isa::kInstrBytes) != 0) {
+    std::ostringstream oss;
+    oss << "gateway_invalid_entry_offset reason=misaligned entry_offset=" << entry_offset
+        << " align=" << sim::isa::kInstrBytes;
+    throw std::runtime_error(oss.str());
+  }
+  if (entry_offset >= code_size) {
+    std::ostringstream oss;
+    oss << "gateway_invalid_entry_offset reason=out_of_range entry_offset=" << entry_offset
+        << " code_size=" << code_size;
+    throw std::runtime_error(oss.str());
+  }
+}
+
 }  // namespace
 
 Gateway::Gateway(SecurityHardware& hardware) : hardware_(hardware) {}
@@ -407,14 +465,15 @@ GatewayLoadResult Gateway::Load(SecureIrPackage package) {
   const ContextHandle handle = next_handle_++;
 
   try {
-    if (handle_to_user_.size() >= kMaxContextHandles) {
+    if (hardware_.GetLoadedHandleCount() >= kMaxContextHandles) {
       std::ostringstream oss;
-      oss << "gateway_capacity_exceeded active_handles=" << handle_to_user_.size()
+      oss << "gateway_capacity_exceeded active_handles=" << hardware_.GetLoadedHandleCount()
           << " max_handles=" << kMaxContextHandles;
       throw std::runtime_error(oss.str());
     }
 
     const SecureIr secure_ir = ParseSecureIr(package.metadata);
+    const std::uint64_t saved_pc = ComputeSavedPc(secure_ir.base_va, secure_ir.entry_offset);
 
     if (secure_ir.signature.empty()) {
       throw std::runtime_error("gateway_invalid_signature reason=empty");
@@ -422,6 +481,8 @@ GatewayLoadResult Gateway::Load(SecureIrPackage package) {
     if (secure_ir.windows.empty()) {
       throw std::runtime_error("gateway_invalid_windows reason=empty");
     }
+    const std::uint64_t code_size = ResolveCodeSize(secure_ir, package);
+    ValidateEntryOffset(secure_ir.entry_offset, code_size);
 
     std::vector<ExecWindow> windows;
     windows.reserve(secure_ir.windows.size());
@@ -448,8 +509,8 @@ GatewayLoadResult Gateway::Load(SecureIrPackage package) {
     hardware_.GetEwcTable().SetWindows(handle, std::move(windows));
     hardware_.GetSpeTable().ConfigurePolicy(handle, secure_ir.user_id, secure_ir.cfi_level,
                                             secure_ir.call_targets, secure_ir.jmp_targets);
+    hardware_.StoreHandleMetadata(handle, saved_pc, secure_ir.user_id);
     hardware_.StoreCodeRegion(handle, secure_ir.base_va, std::move(package.code_memory));
-    handle_to_user_[handle] = secure_ir.user_id;
     hardware_.GetAuditCollector().LogEvent("GATEWAY_LOAD_OK", secure_ir.user_id, handle, secure_ir.base_va,
                                            MakeLoadOkDetail(secure_ir));
     GatewayLoadResult result;
@@ -459,8 +520,8 @@ GatewayLoadResult Gateway::Load(SecureIrPackage package) {
     result.pages = secure_ir.pages;
     return result;
   } catch (const std::exception& ex) {
-    handle_to_user_.erase(handle);
     hardware_.RemoveCodeRegion(handle);
+    hardware_.RemoveHandleMetadata(handle);
     hardware_.GetSpeTable().ClearPolicy(handle);
     hardware_.GetEwcTable().ClearWindows(handle);
     hardware_.GetAuditCollector().LogEvent("GATEWAY_LOAD_FAIL", 0, handle, 0, MakeLoadFailDetail(ex.what()));
@@ -469,24 +530,18 @@ GatewayLoadResult Gateway::Load(SecureIrPackage package) {
 }
 
 void Gateway::Release(ContextHandle handle) {
-  const auto it = handle_to_user_.find(handle);
-  const bool released = (it != handle_to_user_.end());
-  const std::uint32_t user_id = released ? it->second : 0;
-  if (released) {
-    handle_to_user_.erase(it);
-  }
+  const std::optional<std::uint32_t> user_id = hardware_.GetUserIdForHandle(handle);
+  const bool released = user_id.has_value();
   hardware_.RemoveCodeRegion(handle);
+  hardware_.RemoveHandleMetadata(handle);
   hardware_.GetSpeTable().ClearPolicy(handle);
   hardware_.GetEwcTable().ClearWindows(handle);
-  hardware_.GetAuditCollector().LogEvent("GATEWAY_RELEASE", user_id, handle, 0, MakeReleaseDetail(released));
+  hardware_.GetAuditCollector().LogEvent("GATEWAY_RELEASE", user_id.value_or(0), handle, 0,
+                                         MakeReleaseDetail(released));
 }
 
 std::optional<std::uint32_t> Gateway::GetUserIdForHandle(ContextHandle handle) const {
-  auto it = handle_to_user_.find(handle);
-  if (it == handle_to_user_.end()) {
-    return std::nullopt;
-  }
-  return it->second;
+  return hardware_.GetUserIdForHandle(handle);
 }
 
 }  // namespace sim::security
