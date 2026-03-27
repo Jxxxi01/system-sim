@@ -72,43 +72,13 @@ std::string MakeDecryptFailDetail(std::uint32_t key_id, std::string_view detail)
   return oss.str();
 }
 
-const char* OpToString(sim::isa::Op op) {
-  switch (op) {
-    case sim::isa::Op::NOP:
-      return "NOP";
-    case sim::isa::Op::LI:
-      return "LI";
-    case sim::isa::Op::ADD:
-      return "ADD";
-    case sim::isa::Op::XOR:
-      return "XOR";
-    case sim::isa::Op::LD:
-      return "LD";
-    case sim::isa::Op::ST:
-      return "ST";
-    case sim::isa::Op::J:
-      return "J";
-    case sim::isa::Op::BEQ:
-      return "BEQ";
-    case sim::isa::Op::CALL:
-      return "CALL";
-    case sim::isa::Op::RET:
-      return "RET";
-    case sim::isa::Op::HALT:
-      return "HALT";
-    case sim::isa::Op::SYSCALL:
-      return "SYSCALL";
-  }
-  return "UNKNOWN";
-}
-
 bool IsValidRegIndex(int reg) {
   return reg >= 0 && reg < 32;
 }
 
 Trap MakeBadRegTrap(std::uint64_t pc, sim::isa::Op op, const char* field, int reg) {
   std::ostringstream oss;
-  oss << "bad_reg op=" << OpToString(op) << " field=" << field << " reg=" << reg << " pc=" << pc;
+  oss << "bad_reg op=" << sim::isa::OpToString(op) << " field=" << field << " reg=" << reg << " pc=" << pc;
   return Trap{TrapReason::UNKNOWN_OPCODE, pc, oss.str()};
 }
 

@@ -2,6 +2,7 @@
 #include "isa/opcode.hpp"
 #include "test_harness.hpp"
 
+#include <array>
 #include <stdexcept>
 #include <string>
 
@@ -149,6 +150,34 @@ SIM_TEST(NumericTargetIsPcRelativeOffset_Succeeds) {
   SIM_EXPECT_EQ(program.code[0].imm, 16);
   SIM_EXPECT_EQ(program.code[1].imm, -12);
   SIM_EXPECT_EQ(program.code[2].imm, 4);
+}
+
+SIM_TEST(OpToString_AllOpcodes_AreStable) {
+  struct OpStringCase {
+    sim::isa::Op op;
+    const char* expected;
+  };
+
+  const std::array<OpStringCase, 12> cases = {{
+      {sim::isa::Op::NOP, "NOP"},
+      {sim::isa::Op::LI, "LI"},
+      {sim::isa::Op::ADD, "ADD"},
+      {sim::isa::Op::XOR, "XOR"},
+      {sim::isa::Op::LD, "LD"},
+      {sim::isa::Op::ST, "ST"},
+      {sim::isa::Op::J, "J"},
+      {sim::isa::Op::BEQ, "BEQ"},
+      {sim::isa::Op::CALL, "CALL"},
+      {sim::isa::Op::RET, "RET"},
+      {sim::isa::Op::HALT, "HALT"},
+      {sim::isa::Op::SYSCALL, "SYSCALL"},
+  }};
+
+  for (const OpStringCase& test_case : cases) {
+    const std::string actual = sim::isa::OpToString(test_case.op);
+    SIM_EXPECT_EQ(actual, std::string(test_case.expected));
+    SIM_EXPECT_TRUE(actual != "UNKNOWN");
+  }
 }
 
 SIM_TEST(OpcodeCaseInsensitive_LabelAndRegCaseSensitive_BehaviorLocked) {

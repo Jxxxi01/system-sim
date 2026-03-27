@@ -17,4 +17,6 @@ enum class Op {
   SYSCALL
 };
 
+const char* OpToString(Op op);
+
 }  // namespace sim::isa

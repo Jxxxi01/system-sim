@@ -70,7 +70,10 @@ class SecurityHardware {
   std::optional<ContextHandle> active_handle_;
 };
 
-inline SecurityHardware::SecurityHardware() : spe_table_(audit_collector_), pvt_table_(ewc_table_, audit_collector_) {}
+inline SecurityHardware::SecurityHardware() : spe_table_(audit_collector_), pvt_table_(ewc_table_, audit_collector_) {
+  audit_collector_.SetHandleUserIdResolver(
+      [this](ContextHandle handle) -> std::optional<std::uint32_t> { return GetUserIdForHandle(handle); });
+}
 
 inline EwcTable& SecurityHardware::GetEwcTable() { return ewc_table_; }
 

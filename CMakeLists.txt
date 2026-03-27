@@ -35,6 +35,7 @@ add_library(simulator_core STATIC
   src/core/executor.cpp
   src/core/scaffold.cpp
   src/isa/assembler.cpp
+  src/isa/opcode.cpp
   src/kernel/process.cpp
   src/isa/scaffold.cpp
   src/security/code_codec.cpp

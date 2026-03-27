@@ -136,6 +136,33 @@ SIM_TEST(RegisterPage_CodePage_NoWindow_Fails) {
   SIM_EXPECT_TRUE(Contains(events[0].detail, "reason=missing_window"));
 }
 
+SIM_TEST(RegisterPage_MissingWindow_ResolvesUserIdFromHandleMetadata) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  const std::uint64_t base_va = 0x4100;
+  const std::uint32_t user_id = 64;
+
+  const sim::security::ContextHandle handle =
+      gateway
+          .Load(MakePackage(MakeSecureIrJson("pvt_user_resolve", user_id, "sig", base_va,
+                                            MakeCodeWindowJson(1, base_va, base_va + sim::security::kPageSize, 15)),
+                            {1, 2, 3, 4}))
+          .handle;
+
+  hardware.GetAuditCollector().Clear();
+  const sim::security::PvtRegisterResult result =
+      hardware.GetPvtTable().RegisterPage(handle, base_va + sim::security::kPageSize,
+                                          sim::security::PvtPageType::CODE);
+
+  SIM_EXPECT_TRUE(!result.ok);
+  const auto& events = hardware.GetAuditCollector().GetEvents();
+  SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_EQ(events[0].type, std::string("PVT_MISMATCH"));
+  SIM_EXPECT_EQ(events[0].context_handle, handle);
+  SIM_EXPECT_EQ(events[0].user_id, user_id);
+  SIM_EXPECT_TRUE(Contains(events[0].detail, "reason=missing_window"));
+}
+
 SIM_TEST(RegisterPage_CodePage_OwnerMismatch_Fails) {
   sim::security::SecurityHardware hardware;
   const sim::security::ContextHandle alice_handle = 1;
@@ -157,6 +184,7 @@ SIM_TEST(RegisterPage_CodePage_OwnerMismatch_Fails) {
   SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
   SIM_EXPECT_EQ(events[0].type, std::string("PVT_MISMATCH"));
   SIM_EXPECT_EQ(events[0].context_handle, bob_handle);
+  SIM_EXPECT_EQ(events[0].user_id, 0u);
   SIM_EXPECT_TRUE(Contains(events[0].detail, "reason=missing_window"));
 }
 

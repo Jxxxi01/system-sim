@@ -2170,3 +2170,145 @@ Issue 11 分 A/B 两阶段：
 **已推送：** 2026-03-27
 **分支：** issue-12-hidden-entry
 **提交：** issue 12: hidden entry / saved_PC — OS can no longer specify startup PC
+
+## Issue 13：Audit 修复 + 代码质量
+**日期：** 2026-03-27
+**分支：** issue-13-audit-fix
+**状态：** Phase A 方案已确认
+
+### Phase A：计划冻结
+
+#### 目标
+修复审计归因不完整问题（PVT_MISMATCH 审计中 user_id=0），并清理局部代码重复与标签不一致。
+
+#### 前置依赖
+Issue 12（SecurityHardware 已持有 per-handle user_id）。
+
+#### 改动清单
+
+**改动 1：修复 PVT_MISMATCH 审计中 user_id=0 — AuditCollector resolver 方案**
+
+PvtTable 在 PVT_MISMATCH missing_window 分支写审计时，user_id 来源是 EwcQueryResult.owner_user_id，无匹配窗口时默认为 0。根本原因是 PvtTable 无 handle→user_id 查询能力。
+
+修复方案：在 AuditCollector 中新增 handle→user_id resolver。SecurityHardware 构造完成后将自身查询能力注入 AuditCollector。LogEvent 收到 user_id=0 + 有效 context_handle 时通过 resolver 补全；查不到则保持 0。
+
+此方案优于 PvtTable 注入方案：resolver 在审计公共落点，所有写审计的模块自动受益；PvtTable 接口不变。
+
+resolver 逻辑放在 LogEvent(AuditEvent) 层（公共落点），而非只在字符串重载中。
+
+**改动 2：合并重复 OpToString**
+
+executor.cpp 和 spe.cpp 各有一份逐 case 映射完全一致的 OpToString。合并为 isa/ 下的共享实现，两个消费方改为调用共享版本。
+
+**改动 3：删除 demo_normal.cpp 死函数 ProgramEndVa**
+
+demo_normal.cpp:16 的 ProgramEndVa 在该文件内零调用。securir_builder.cpp 中有独立的同名实现（带溢出保护），不受影响。
+
+**改动 4：修正 SPE stage 标签**
+
+spe.cpp 中 CALL/J/BEQ 违规的审计 stage 标签写为 "decode"，但 Executor 调用 CheckInstruction 的位置在执行语义完成之后（executor.cpp:466）。改为 "execute"。RET 的 "execute" 标签不变。
+
+**改动 5：SPE Policy struct 添加 bounds 占位**
+
+Policy struct 新增 bounds 占位字段 + 注释，不参与运行时逻辑，不影响 ConfigurePolicy 公开接口。
+
+#### 文件范围
+
+| 文件 | 改动 | 关联改动项 |
+|------|------|-----------|
+| `include/security/audit.hpp` | 修改（新增 resolver 成员 + setter） | 1 |
+| `src/security/audit.cpp` | 修改（LogEvent 补全逻辑） | 1 |
+| `include/security/hardware.hpp` | 修改（构造函数体注入 resolver） | 1 |
+| `include/isa/opcode.hpp` | 修改（新增 OpToString 声明） | 2 |
+| `src/isa/opcode.cpp` | 新建（OpToString 共享实现） | 2 |
+| `src/core/executor.cpp` | 修改（删除私有 OpToString，改用共享版） | 2 |
+| `src/security/spe.cpp` | 修改（删除私有 OpToString + stage 标签修正） | 2, 4 |
+| `include/security/spe.hpp` | 修改（Policy bounds 占位） | 5 |
+| `demos/normal/demo_normal.cpp` | 修改（删除死函数 ProgramEndVa） | 3 |
+| `tests/test_pvt.cpp` | 修改（新增走 Gateway 的集成测试验证 user_id） | 1 |
+| `tests/test_spe.cpp` | 修改（stage 标签断言从 decode 改为 execute） | 4 |
+| `CMakeLists.txt` | 修改（新增 src/isa/opcode.cpp） | 2 |
+
+#### 不变量
+
+1. AuditCollector 对 user_id 非零的调用方无影响——只在 user_id=0 + 有效 handle 时尝试补全
+2. user_id=0 作为"缺失值"语义须持续成立（当前无 user_id=0 的合法业务身份）
+3. GATEWAY_LOAD_FAIL / GATEWAY_RELEASE 失败路径先删 metadata 再写审计，resolver 查不到，保持 0——不会误补全
+4. OpToString 合并后行为不变，覆盖全部 12 个 Op 枚举值
+5. bounds 占位不影响任何运行时行为
+
+#### 测试目标
+
+1. PVT_MISMATCH 审计事件中 user_id 非零且正确（新增集成测试，走 Gateway load 路径，放 test_pvt.cpp）
+2. 现有 test_pvt.cpp 裸测试继续通过（不断言 user_id，不受影响）
+3. SPE stage 标签断言从 decode 改为 execute（test_spe.cpp 3 处）
+4. OpToString 合并后现有 SPE / Executor 测试回归通过
+5. 全部 8 套 CTest 继续通过
+
+#### 设计决策记录
+
+**D-1：resolver 放 AuditCollector 而非 PvtTable**
+- 决策：handle→user_id 补全逻辑放在 AuditCollector 公共落点。
+- 原因："根据 handle 补全审计归因"是审计职责，不是 PVT 职责。所有写审计的模块自动受益，无需逐模块注入。PvtTable 接口零改动。
+
+**D-2：user_id=0 视为缺失值**
+- 决策：LogEvent 中 user_id=0 + 有效 context_handle → 尝试 resolver 补全；查不到保持 0。
+- 原因：当前无 user_id=0 的合法业务身份。生产路径中 Gateway load 先写 metadata，补全一定成功。裸测试中无 metadata，保持 0 是正确的预期行为。
+
+**D-3：OpToString 新建 src/isa/opcode.cpp**
+- 决策：新建独立实现文件，不放在 opcode.hpp 中 inline。
+- 原因：src/isa/ 下无现成 opcode utility 文件。独立 .cpp 与现有 assembler.cpp 并列，保持一致性。
+
+**D-4：原第 1 项（EWC_ILLEGAL_PC audit user_id=0）从范围中移除**
+- 决策：不在 Issue 13 中修复此项。
+- 原因：Codex 可行性评估确认 Issue 12 已将 executor.cpp 中 EWC_ILLEGAL_PC 审计改为使用 metadata->user_id，当前基线不存在此问题。
+
+#### Codex 可行性评估摘要（Step 2 + Step 3 复查）
+- session_id: 019d2af7-ce9c-7a00-8f78-d681a2f3a3e8
+- 总体判断：方案可行，无硬阻塞
+- 第 1 轮（Step 2）：发现 EWC_ILLEGAL_PC 已在 Issue 12 修复；PVT resolver 方案可行但 test_pvt.cpp 有测试可达性风险
+- 第 2 轮（Step 3 复查）：确认 AuditCollector resolver 方案可行，误补全风险极低，现有测试不受影响
+- 初始化顺序安全：构造函数体执行时 handle_metadata_ 已完成，SpeTable/PvtTable 构造时不写审计
+- LogEvent(AuditEvent) 层是正确的公共落点
+
+### Phase B：实现复盘
+**状态：** 已实现（未推送）
+**提交：** TBD
+**远端：** 未推送
+
+#### 1. 变更文件清单
+- 修改 `include/security/audit.hpp`：为 `AuditCollector` 增加 handle→`user_id` resolver 类型、setter 和成员存储。
+- 修改 `src/security/audit.cpp`：在 `LogEvent(AuditEvent)` 公共落点实现 `user_id=0 + context_handle>0` 的补全逻辑；查不到时保持 0。
+- 修改 `include/security/hardware.hpp`：在 `SecurityHardware` 构造函数体内注入 resolver，复用现有 per-handle metadata 查询能力。
+- 修改 `include/isa/opcode.hpp`：新增共享 `OpToString` 声明。
+- 新增 `src/isa/opcode.cpp`：落地 12 个 `Op` 枚举值到字符串的共享实现。
+- 修改 `src/core/executor.cpp`：删除私有 `OpToString`，改为调用 `sim::isa::OpToString`。
+- 修改 `src/security/spe.cpp`：删除私有 `OpToString`，改用共享实现；将 `CALL` / `J` / `BEQ` 违规审计的 `stage` 从 `decode` 修正为 `execute`。
+- 修改 `include/security/spe.hpp`：给 `Policy` 增加 `bounds` 占位字段和注释，不参与运行时逻辑。
+- 修改 `demos/normal/demo_normal.cpp`：删除未使用的死函数 `ProgramEndVa`。
+- 修改 `tests/test_pvt.cpp`：新增走 `Gateway::Load()` 建立 metadata 后触发 `PVT_MISMATCH missing_window` 的集成测试，并补一条裸硬件路径 `user_id==0` 断言，锁定 resolver 的正/负路径。
+- 修改 `tests/test_spe.cpp`：将 3 处 `stage=decode` 断言改为 `stage=execute`。
+- 修改 `tests/test_gateway.cpp`：为现有 `GATEWAY_LOAD_FAIL` 测试显式补 `user_id==0` 断言；新增 `GATEWAY_RELEASE` 缺失 handle 的负路径测试，锁定“先删 metadata 再写 audit”时 resolver 不误补全。
+- 修改 `tests/test_isa_assembler.cpp`：新增 `OpToString` 全覆盖回归测试，逐一校验 12 个枚举值的稳定字符串输出。
+- 修改 `CMakeLists.txt`：将 `src/isa/opcode.cpp` 加入 `simulator_core`。
+- 修改 `docs/project_log.md`：追加本次 Issue 13 的实现复盘。
+
+#### 2. 测试与运行
+- 已读取/确认：
+  - `git diff --stat`
+- 已执行命令：
+  - `cmake --build build`
+  - `ctest --test-dir build`
+- 结果：
+  - `git diff --stat` 显示当前代码改动集中在 14 个实现/测试文件，核心范围与 Issue 13 的 audit 修复、opcode 去重、SPE 标签修正及测试补强一致。
+  - `cmake --build build` 输出 `ninja: no work to do.`，说明当前工作区代码已处于最新构建状态。
+  - `ctest --test-dir build` 结果为 `100% tests passed, 0 tests failed out of 8`。
+
+#### 3. 与 Phase A 方案的偏差
+- 运行时代码实现与 Phase A 方案一致：`PvtTable` 接口未改，resolver 仍放在 `AuditCollector` 公共落点，`OpToString` 仍采用独立 `src/isa/opcode.cpp` 方案，`bounds` 仍只作为占位字段。
+- 实现阶段在代码审查后额外补了 2 组低风险测试覆盖：`tests/test_gateway.cpp` 的 resolver 负路径断言，以及 `tests/test_isa_assembler.cpp` 的 `OpToString` 全覆盖回归。这两项不改变运行时行为，只是把 Phase A 中“误补全不会发生”和“12 个枚举值映射完整”这两条不变量显式锁进测试。
+
+#### 4. 已知限制 & 下一步建议
+- 当前把 `user_id=0` 固定当作“缺失值”处理；如果后续需要支持合法业务 `user_id=0`，Audit resolver 的触发条件需要改成显式 `optional` / tri-state 语义，而不是复用数值 0。
+- `OpToString` 已有全覆盖回归，但未来若扩充 `Op` 枚举，仍需同步更新 `opcode.cpp` 和测试，否则默认分支会回落到 `"UNKNOWN"`。
+- `Policy.bounds` 目前只是结构占位，没有任何校验或执行语义；后续若接入 bounds 规则，需要再补对应的配置入口、审计事件和测试。

@@ -115,7 +115,7 @@ func:
   SIM_EXPECT_EQ(artifacts.result.trap.pc, base);
   SIM_EXPECT_EQ(artifacts.audit_events.size(), static_cast<std::size_t>(1));
   SIM_EXPECT_EQ(artifacts.audit_events[0].type, std::string("SPE_VIOLATION"));
-  SIM_EXPECT_TRUE(Contains(artifacts.audit_events[0].detail, "stage=decode"));
+  SIM_EXPECT_TRUE(Contains(artifacts.audit_events[0].detail, "stage=execute"));
   SIM_EXPECT_TRUE(Contains(artifacts.audit_events[0].detail, "op=CALL"));
 }
 
@@ -134,7 +134,7 @@ target:
   SIM_EXPECT_EQ(artifacts.result.trap.reason, sim::core::TrapReason::SPE_VIOLATION);
   SIM_EXPECT_EQ(artifacts.result.trap.pc, base);
   SIM_EXPECT_EQ(artifacts.audit_events.size(), static_cast<std::size_t>(1));
-  SIM_EXPECT_TRUE(Contains(artifacts.audit_events[0].detail, "stage=decode"));
+  SIM_EXPECT_TRUE(Contains(artifacts.audit_events[0].detail, "stage=execute"));
   SIM_EXPECT_TRUE(Contains(artifacts.audit_events[0].detail, "op=J"));
 }
 
@@ -269,7 +269,7 @@ SIM_TEST(SPE_AuditDetails_ContainStageMarkers) {
       hardware.GetSpeTable().CheckInstruction(1, sim::isa::Op::CALL, 0x2800, 0x2810, 0x2804);
   SIM_EXPECT_TRUE(!decode_violation.allow);
   SIM_EXPECT_EQ(hardware.GetAuditCollector().GetEvents().size(), static_cast<std::size_t>(1));
-  SIM_EXPECT_TRUE(Contains(hardware.GetAuditCollector().GetEvents()[0].detail, "stage=decode"));
+  SIM_EXPECT_TRUE(Contains(hardware.GetAuditCollector().GetEvents()[0].detail, "stage=execute"));
 
   hardware.GetAuditCollector().Clear();
   hardware.GetSpeTable().ConfigurePolicy(1, 33, 2, std::vector<std::uint64_t>{}, std::vector<std::uint64_t>{});

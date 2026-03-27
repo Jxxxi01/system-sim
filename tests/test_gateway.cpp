@@ -137,6 +137,7 @@ SIM_TEST(Gateway_Load_MisalignedEntryOffset_Fails) {
     const auto& events = hardware.GetAuditCollector().GetEvents();
     SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
     SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_EQ(events[0].user_id, 0u);
     SIM_EXPECT_TRUE(Contains(events[0].detail, "reason=misaligned"));
   }
 }
@@ -158,6 +159,7 @@ SIM_TEST(Gateway_Load_OutOfRangeEntryOffset_Fails) {
     const auto& events = hardware.GetAuditCollector().GetEvents();
     SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
     SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_EQ(events[0].user_id, 0u);
     SIM_EXPECT_TRUE(Contains(events[0].detail, "reason=out_of_range"));
   }
 }
@@ -189,6 +191,7 @@ SIM_TEST(Gateway_Load_EmptySignature_Fails) {
     const auto& events = hardware.GetAuditCollector().GetEvents();
     SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
     SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_EQ(events[0].user_id, 0u);
     SIM_EXPECT_EQ(events[0].context_handle, static_cast<sim::security::ContextHandle>(1));
     SIM_EXPECT_TRUE(Contains(events[0].detail, "gateway_invalid_signature"));
   }
@@ -208,6 +211,7 @@ SIM_TEST(Gateway_Load_MissingWindows_Fails) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_missing_field field=windows"));
     const auto& event = hardware.GetAuditCollector().GetEvents()[0];
     SIM_EXPECT_EQ(event.type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_EQ(event.user_id, 0u);
     SIM_EXPECT_TRUE(Contains(event.detail, "gateway_missing_field"));
   }
 }
@@ -223,6 +227,7 @@ SIM_TEST(Gateway_Load_EmptyWindows_Fails) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_windows"));
     const auto& event = hardware.GetAuditCollector().GetEvents()[0];
     SIM_EXPECT_EQ(event.type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_EQ(event.user_id, 0u);
     SIM_EXPECT_TRUE(Contains(event.detail, "gateway_invalid_windows"));
   }
 }
@@ -276,6 +281,21 @@ SIM_TEST(Gateway_Release_ClearsMappingWindowsAndDoesNotReuseHandle) {
   SIM_EXPECT_TRUE(Contains(events[1].detail, "status=cleared"));
 }
 
+SIM_TEST(Gateway_Release_MissingHandle_KeepsAuditUserIdZero) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  const sim::security::ContextHandle missing_handle = 9;
+
+  gateway.Release(missing_handle);
+
+  const auto& events = hardware.GetAuditCollector().GetEvents();
+  SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
+  SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_RELEASE"));
+  SIM_EXPECT_EQ(events[0].user_id, 0u);
+  SIM_EXPECT_EQ(events[0].context_handle, missing_handle);
+  SIM_EXPECT_TRUE(Contains(events[0].detail, "status=missing"));
+}
+
 SIM_TEST(Gateway_Load_OverlappingWindows_Fails) {
   sim::security::SecurityHardware hardware;
   sim::security::Gateway gateway(hardware);
@@ -291,6 +311,7 @@ SIM_TEST(Gateway_Load_OverlappingWindows_Fails) {
     const auto& events = hardware.GetAuditCollector().GetEvents();
     SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
     SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_EQ(events[0].user_id, 0u);
     SIM_EXPECT_TRUE(Contains(events[0].detail, "overlap"));
   }
 }
@@ -307,6 +328,7 @@ SIM_TEST(Gateway_Load_InvalidType_Fails) {
     SIM_EXPECT_TRUE(Contains(ex.what(), "gateway_invalid_window_type"));
     const auto& event = hardware.GetAuditCollector().GetEvents()[0];
     SIM_EXPECT_EQ(event.type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_EQ(event.user_id, 0u);
     SIM_EXPECT_TRUE(Contains(event.detail, "gateway_invalid_window_type"));
   }
 }
@@ -328,6 +350,7 @@ SIM_TEST(Gateway_Load_InvalidPageType_Fails) {
   const auto& events = hardware.GetAuditCollector().GetEvents();
   SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
   SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+  SIM_EXPECT_EQ(events[0].user_id, 0u);
   SIM_EXPECT_TRUE(Contains(events[0].detail, "gateway_invalid_page_type"));
   SIM_EXPECT_TRUE(hardware.GetCodeRegion(1) == nullptr);
   const sim::security::EwcQueryResult query = hardware.GetEwcTable().Query(base, 1);
@@ -363,6 +386,7 @@ SIM_TEST(Gateway_Load_CapacityOverflow_Fails) {
     const auto& events = hardware.GetAuditCollector().GetEvents();
     SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
     SIM_EXPECT_EQ(events[0].type, std::string("GATEWAY_LOAD_FAIL"));
+    SIM_EXPECT_EQ(events[0].user_id, 0u);
     SIM_EXPECT_EQ(events[0].context_handle, static_cast<sim::security::ContextHandle>(257));
     SIM_EXPECT_TRUE(Contains(events[0].detail, "gateway_capacity_exceeded"));
   }

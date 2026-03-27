@@ -30,6 +30,7 @@ class SpeTable {
   struct Policy {
     std::uint32_t user_id = 0;
     std::uint32_t cfi_level = 0;
+    std::vector<std::uint64_t> bounds;  // Reserved for future policy-bound metadata.
     std::vector<std::uint64_t> call_targets;
     std::vector<std::uint64_t> jmp_targets;
     std::vector<std::uint64_t> shadow_stack;

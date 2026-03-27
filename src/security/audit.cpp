@@ -17,8 +17,18 @@ void AuditCollector::LogEvent(std::string type, std::uint32_t user_id, std::uint
 }
 
 void AuditCollector::LogEvent(AuditEvent event) {
+  if (event.user_id == 0 && event.context_handle > 0 && handle_user_id_resolver_) {
+    const std::optional<std::uint32_t> resolved_user_id = handle_user_id_resolver_(event.context_handle);
+    if (resolved_user_id.has_value()) {
+      event.user_id = *resolved_user_id;
+    }
+  }
   event.seq_no = next_seq_no_++;
   events_.push_back(std::move(event));
+}
+
+void AuditCollector::SetHandleUserIdResolver(HandleUserIdResolver resolver) {
+  handle_user_id_resolver_ = std::move(resolver);
 }
 
 const std::vector<AuditEvent>& AuditCollector::GetEvents() const { return events_; }

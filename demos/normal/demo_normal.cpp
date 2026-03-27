@@ -13,10 +13,6 @@
 
 namespace {
 
-std::uint64_t ProgramEndVa(const sim::isa::AsmProgram& program) {
-  return program.base_va + program.code.size() * sim::isa::kInstrBytes;
-}
-
 void PrintArtifacts(const sim::core::ExecResult& result, const sim::security::AuditCollector& audit) {
   for (const auto& event : audit.GetEvents()) {
     std::cout << "AUDIT " << sim::security::FormatAuditEvent(event) << '\n';

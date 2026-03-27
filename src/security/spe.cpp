@@ -7,36 +7,6 @@
 namespace sim::security {
 namespace {
 
-const char* OpToString(sim::isa::Op op) {
-  switch (op) {
-    case sim::isa::Op::NOP:
-      return "NOP";
-    case sim::isa::Op::LI:
-      return "LI";
-    case sim::isa::Op::ADD:
-      return "ADD";
-    case sim::isa::Op::XOR:
-      return "XOR";
-    case sim::isa::Op::LD:
-      return "LD";
-    case sim::isa::Op::ST:
-      return "ST";
-    case sim::isa::Op::J:
-      return "J";
-    case sim::isa::Op::BEQ:
-      return "BEQ";
-    case sim::isa::Op::CALL:
-      return "CALL";
-    case sim::isa::Op::RET:
-      return "RET";
-    case sim::isa::Op::HALT:
-      return "HALT";
-    case sim::isa::Op::SYSCALL:
-      return "SYSCALL";
-  }
-  return "UNKNOWN";
-}
-
 bool ContainsTarget(const std::vector<std::uint64_t>& targets, std::uint64_t target) {
   for (std::uint64_t allowed_target : targets) {
     if (allowed_target == target) {
@@ -51,8 +21,9 @@ SpeCheckResult MakeViolationDetail(const char* stage, sim::isa::Op op, const cha
                                    std::uint64_t expected_pc = 0, bool has_expected_pc = false,
                                    std::size_t shadow_depth = 0) {
   std::ostringstream oss;
-  oss << "stage=" << stage << " op=" << OpToString(op) << " reason=" << reason << " cfi_level=" << cfi_level
-      << " pc=" << pc << " committed_pc=" << committed_pc << " next_pc=" << next_pc;
+  oss << "stage=" << stage << " op=" << sim::isa::OpToString(op) << " reason=" << reason
+      << " cfi_level=" << cfi_level << " pc=" << pc << " committed_pc=" << committed_pc
+      << " next_pc=" << next_pc;
   if (has_expected_pc) {
     oss << " expected_pc=" << expected_pc;
   }
@@ -98,7 +69,7 @@ SpeCheckResult SpeTable::CheckInstruction(ContextHandle handle, sim::isa::Op op,
   switch (op) {
     case sim::isa::Op::CALL: {
       if (policy.cfi_level >= 3 && !ContainsTarget(policy.call_targets, committed_pc)) {
-        result = MakeViolationDetail("decode", op, "call_target_not_allowed", policy.cfi_level, pc, committed_pc,
+        result = MakeViolationDetail("execute", op, "call_target_not_allowed", policy.cfi_level, pc, committed_pc,
                                      next_pc, 0, false, policy.shadow_stack.size());
         break;
       }
@@ -107,7 +78,7 @@ SpeCheckResult SpeTable::CheckInstruction(ContextHandle handle, sim::isa::Op op,
     }
     case sim::isa::Op::J: {
       if (policy.cfi_level >= 3 && !ContainsTarget(policy.jmp_targets, committed_pc)) {
-        result = MakeViolationDetail("decode", op, "jump_target_not_allowed", policy.cfi_level, pc, committed_pc,
+        result = MakeViolationDetail("execute", op, "jump_target_not_allowed", policy.cfi_level, pc, committed_pc,
                                      next_pc, 0, false, policy.shadow_stack.size());
       }
       break;
@@ -117,7 +88,7 @@ SpeCheckResult SpeTable::CheckInstruction(ContextHandle handle, sim::isa::Op op,
         return SpeCheckResult{};
       }
       if (policy.cfi_level >= 3 && !ContainsTarget(policy.jmp_targets, committed_pc)) {
-        result = MakeViolationDetail("decode", op, "jump_target_not_allowed", policy.cfi_level, pc, committed_pc,
+        result = MakeViolationDetail("execute", op, "jump_target_not_allowed", policy.cfi_level, pc, committed_pc,
                                      next_pc, 0, false, policy.shadow_stack.size());
       }
       break;

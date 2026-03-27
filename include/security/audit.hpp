@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,13 +19,17 @@ struct AuditEvent {
 
 class AuditCollector {
  public:
+  using HandleUserIdResolver = std::function<std::optional<std::uint32_t>(std::uint32_t)>;
+
   void LogEvent(std::string type, std::uint32_t user_id, std::uint32_t context_handle, std::uint64_t pc,
                 std::string detail);
   void LogEvent(AuditEvent event);
+  void SetHandleUserIdResolver(HandleUserIdResolver resolver);
   const std::vector<AuditEvent>& GetEvents() const;
   void Clear();
 
  private:
+  HandleUserIdResolver handle_user_id_resolver_;
   std::uint64_t next_seq_no_ = 1;
   std::vector<AuditEvent> events_;
 };
