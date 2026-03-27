@@ -171,6 +171,15 @@ target_link_libraries(demo_malicious_mapping
     simulator_core
 )
 
+add_executable(demo_ablation
+  demos/ablation/demo_ablation.cpp
+)
+
+target_link_libraries(demo_ablation
+  PRIVATE
+    simulator_core
+)
+
 add_executable(demo_cross_process
   demos/cross_process/demo_cross_process.cpp
 )
