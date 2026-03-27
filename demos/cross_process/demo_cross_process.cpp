@@ -3,7 +3,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 #include "core/executor.hpp"
 #include "isa/assembler.hpp"
@@ -12,47 +11,29 @@
 #include "security/audit.hpp"
 #include "security/gateway.hpp"
 #include "security/hardware.hpp"
-#include "security/pvt.hpp"
 #include "security/securir_builder.hpp"
 
 namespace {
 
-struct CaseAOutcome {
+struct CaseOutcome {
   sim::core::ExecResult result;
-  bool has_gateway_load_ok = false;
+  bool has_expected_ewc_audit = false;
 };
 
-struct CaseBOutcome {
-  sim::security::PvtRegisterResult register_result;
-  bool has_missing_window_audit = false;
-};
-
-void PrintAuditEvents(const sim::security::AuditCollector& audit) {
+void PrintArtifacts(const sim::core::ExecResult& result, const sim::security::AuditCollector& audit) {
   for (const auto& event : audit.GetEvents()) {
     std::cout << "AUDIT " << sim::security::FormatAuditEvent(event) << '\n';
   }
-}
-
-void PrintArtifacts(const sim::core::ExecResult& result, const sim::security::AuditCollector& audit) {
-  PrintAuditEvents(audit);
   for (const auto& trace : result.context_trace) {
     std::cout << "CTX " << trace << '\n';
   }
 }
 
-bool HasAuditType(const sim::security::AuditCollector& audit, const std::string& type) {
-  for (const auto& event : audit.GetEvents()) {
-    if (event.type == type) {
-      return true;
-    }
-  }
-  return false;
-}
-
 const sim::security::AuditEvent* FindAuditEvent(const sim::security::AuditCollector& audit, const std::string& type,
-                                                const std::string& detail_substr) {
+                                                std::uint32_t user_id, sim::security::ContextHandle handle,
+                                                std::uint64_t pc) {
   for (const auto& event : audit.GetEvents()) {
-    if (event.type == type && event.detail.find(detail_substr) != std::string::npos) {
+    if (event.type == type && event.user_id == user_id && event.context_handle == handle && event.pc == pc) {
       return &event;
     }
   }
@@ -65,160 +46,103 @@ sim::core::ExecResult RunProgram(sim::security::SecurityHardware& hardware) {
   return sim::core::ExecuteProgram(options);
 }
 
-CaseAOutcome RunCaseA(const sim::isa::AsmProgram& alice_program, std::uint64_t alice_base_va) {
-  sim::security::SecurityHardware hardware;
-  sim::security::Gateway gateway(hardware);
-  sim::security::AuditCollector& audit = hardware.GetAuditCollector();
-  sim::kernel::KernelProcessTable process_table(gateway, hardware, audit);
-
-  audit.Clear();
-
-  sim::security::SecureIrBuilderConfig alice_config;
-  alice_config.program_name = "alice_case_a";
-  alice_config.user_id = 1001;
-  alice_config.key_id = 11;
-  alice_config.window_id = 1;
-  alice_config.pages = {{alice_base_va, sim::security::PvtPageType::CODE}};
-
-  const sim::security::ContextHandle alice_handle =
-      process_table.LoadProcess(sim::security::SecureIrBuilder::Build(alice_program, alice_config));
-  process_table.ContextSwitch(alice_handle);
-  const sim::core::ExecResult result = RunProgram(hardware);
-
-  std::cout << "[CASE_A_NORMAL]\n";
-  sim::core::PrintRunSummary(result, std::cout);
-  PrintArtifacts(result, audit);
-  std::cout << "CASE_A_GATEWAY_LOAD_OK=" << (HasAuditType(audit, "GATEWAY_LOAD_OK") ? "true" : "false") << '\n';
-
-  return CaseAOutcome{result, HasAuditType(audit, "GATEWAY_LOAD_OK")};
+sim::security::SecureIrBuilderConfig MakeConfig(const std::string& program_name, std::uint32_t user_id,
+                                                std::uint32_t key_id, std::uint32_t window_id,
+                                                std::uint64_t base_va) {
+  sim::security::SecureIrBuilderConfig config;
+  config.program_name = program_name;
+  config.user_id = user_id;
+  config.key_id = key_id;
+  config.window_id = window_id;
+  config.pages = {{base_va, sim::security::PvtPageType::CODE}};
+  return config;
 }
 
-CaseBOutcome RunCaseB(const sim::isa::AsmProgram& alice_program, std::uint64_t alice_base_va,
-                      const sim::isa::AsmProgram& bob_program, std::uint64_t bob_base_va) {
+CaseOutcome RunCaseA(const sim::isa::AsmProgram& program_a, std::uint64_t base_va_a) {
   sim::security::SecurityHardware hardware;
   sim::security::Gateway gateway(hardware);
   sim::security::AuditCollector& audit = hardware.GetAuditCollector();
   sim::kernel::KernelProcessTable process_table(gateway, hardware, audit);
 
-  audit.Clear();
+  const sim::security::ContextHandle handle_a =
+      process_table.LoadProcess(sim::security::SecureIrBuilder::Build(
+          program_a, MakeConfig("same_user_process_a", 1001, 11, 1, base_va_a)));
+  process_table.ContextSwitch(handle_a);
+  const sim::core::ExecResult result = RunProgram(hardware);
 
-  sim::security::SecureIrBuilderConfig alice_config;
-  alice_config.program_name = "alice_case_b";
-  alice_config.user_id = 1001;
-  alice_config.key_id = 11;
-  alice_config.window_id = 1;
-  alice_config.pages = {{alice_base_va, sim::security::PvtPageType::CODE}};
+  std::cout << "[CASE_A_NORMAL_EXECUTION]\n";
+  std::cout << "HANDLE_A=" << handle_a << '\n';
+  sim::core::PrintRunSummary(result, std::cout);
+  PrintArtifacts(result, audit);
 
-  sim::security::SecureIrBuilderConfig bob_config;
-  bob_config.program_name = "bob_case_b";
-  bob_config.user_id = 1002;
-  bob_config.key_id = 22;
-  bob_config.window_id = 2;
-  bob_config.pages = {{bob_base_va, sim::security::PvtPageType::CODE}};
+  return CaseOutcome{result, false};
+}
 
-  static_cast<void>(process_table.LoadProcess(sim::security::SecureIrBuilder::Build(alice_program, alice_config)));
-  const sim::security::ContextHandle bob_handle =
-      process_table.LoadProcess(sim::security::SecureIrBuilder::Build(bob_program, bob_config));
+CaseOutcome RunCaseB(const sim::isa::AsmProgram& program_a, std::uint64_t base_va_a,
+                     const sim::isa::AsmProgram& program_b, std::uint64_t base_va_b) {
+  sim::security::SecurityHardware hardware;
+  sim::security::Gateway gateway(hardware);
+  sim::security::AuditCollector& audit = hardware.GetAuditCollector();
+  sim::kernel::KernelProcessTable process_table(gateway, hardware, audit);
 
-  const sim::security::PvtRegisterResult register_result =
-      hardware.GetPvtTable().RegisterPage(bob_handle, alice_base_va, sim::security::PvtPageType::CODE);
-  const sim::security::AuditEvent* mismatch_event =
-      FindAuditEvent(audit, "PVT_MISMATCH", "reason=missing_window");
+  const sim::security::ContextHandle handle_a =
+      process_table.LoadProcess(sim::security::SecureIrBuilder::Build(
+          program_a, MakeConfig("same_user_process_a", 1001, 11, 1, base_va_a)));
+  const sim::security::ContextHandle handle_b =
+      process_table.LoadProcess(sim::security::SecureIrBuilder::Build(
+          program_b, MakeConfig("same_user_process_b", 1001, 12, 2, base_va_b)));
 
-  std::cout << "[CASE_B_MALICIOUS_MAPPING]\n";
-  std::cout << "REGISTER_PAGE_OK=" << (register_result.ok ? "true" : "false") << '\n';
-  std::cout << "REGISTER_PAGE_ERROR=" << (register_result.error.empty() ? "<empty>" : register_result.error)
-            << '\n';
-  if (mismatch_event != nullptr) {
-    std::cout << "CASE_B_MATCHED_AUDIT " << sim::security::FormatAuditEvent(*mismatch_event) << '\n';
+  process_table.ContextSwitch(handle_b);
+  const sim::core::ExecResult result = RunProgram(hardware);
+  const sim::security::AuditEvent* ewc_event =
+      FindAuditEvent(audit, "EWC_ILLEGAL_PC", 1001, handle_b, base_va_a);
+
+  std::cout << "[CASE_B_SAME_USER_CROSS_PROCESS]\n";
+  std::cout << "HANDLE_A=" << handle_a << '\n';
+  std::cout << "HANDLE_B=" << handle_b << '\n';
+  sim::core::PrintRunSummary(result, std::cout);
+  std::cout << "EXPECTED_EWC_AUDIT=" << (ewc_event != nullptr ? "true" : "false") << '\n';
+  if (ewc_event != nullptr) {
+    std::cout << "MATCHED_AUDIT " << sim::security::FormatAuditEvent(*ewc_event) << '\n';
   } else {
-    std::cout << "CASE_B_MATCHED_AUDIT <missing>\n";
+    std::cout << "MATCHED_AUDIT <missing>\n";
   }
-  PrintAuditEvents(audit);
-
-  return CaseBOutcome{register_result, mismatch_event != nullptr};
-}
-
-sim::core::ExecResult RunCaseC(const sim::isa::AsmProgram& alice_program, std::uint64_t alice_base_va,
-                               const sim::isa::AsmProgram& bob_program, std::uint64_t bob_base_va) {
-  sim::security::SecurityHardware hardware;
-  sim::security::Gateway gateway(hardware);
-  sim::security::AuditCollector& audit = hardware.GetAuditCollector();
-  sim::kernel::KernelProcessTable process_table(gateway, hardware, audit);
-
-  audit.Clear();
-
-  sim::security::SecureIrBuilderConfig alice_config;
-  alice_config.program_name = "alice_payload";
-  alice_config.user_id = 1001;
-  alice_config.key_id = 11;
-  alice_config.window_id = 1;
-  static_cast<void>(alice_program);
-  static_cast<void>(alice_config);
-
-  sim::security::SecureIrBuilderConfig bob_config;
-  bob_config.program_name = "bob_case_c";
-  bob_config.user_id = 1002;
-  bob_config.key_id = 22;
-  bob_config.window_id = 2;
-
-  const sim::security::ContextHandle bob_handle =
-      process_table.LoadProcess(sim::security::SecureIrBuilder::Build(bob_program, bob_config));
-
-  std::ostringstream bob_attack_source;
-  bob_attack_source << "J "
-                    << (static_cast<std::int64_t>(alice_base_va) -
-                        static_cast<std::int64_t>(bob_base_va + sim::isa::kInstrBytes))
-                    << '\n'
-                    << "HALT\n";
-  const sim::isa::AsmProgram bob_attack_program = sim::isa::AssembleText(bob_attack_source.str(), bob_base_va);
-  const std::vector<std::uint8_t> bob_attack_code_memory =
-      sim::security::SecureIrBuilder::Build(bob_attack_program, bob_config).code_memory;
-
-  hardware.StoreCodeRegion(bob_handle, bob_base_va, bob_attack_code_memory);
-  process_table.ContextSwitch(bob_handle);
-  const sim::core::ExecResult result = RunProgram(hardware);
-
-  std::cout << "[CASE_C_DEFENSE_IN_DEPTH]\n";
-  sim::core::PrintRunSummary(result, std::cout);
   PrintArtifacts(result, audit);
-  std::cout
-      << "CASE_C_NOTE=PVT can be bypassed by a malicious OS write, but execution still starts from Bob saved_pc and "
-         "EWC denies the cross-process jump."
-      << '\n';
-  std::cout << "CASE_C_NOTE_2=PVT and EWC are complementary independent enforcement layers.\n";
 
-  return result;
+  return CaseOutcome{result, ewc_event != nullptr};
 }
 
 }  // namespace
 
 int main() {
   try {
-    const std::uint64_t alice_base_va = 0x1000;
-    const std::uint64_t bob_base_va = 0x2000;
+    const std::uint64_t base_va_a = 0x1000;
+    const std::uint64_t base_va_b = 0x2000;
 
-    const std::string alice_source = R"(
+    const std::string process_a_source = R"(
   LI x1, 10
   LI x2, 32
   ADD x3, x1, x2
   HALT
 )";
-    const std::string bob_source = R"(
-  LI x4, 7
-  HALT
-)";
 
-    const sim::isa::AsmProgram alice_program = sim::isa::AssembleText(alice_source, alice_base_va);
-    const sim::isa::AsmProgram bob_program = sim::isa::AssembleText(bob_source, bob_base_va);
+    std::ostringstream process_b_source;
+    process_b_source << "LI x4, 7\n";
+    process_b_source << "J "
+                     << (static_cast<std::int64_t>(base_va_a) -
+                         static_cast<std::int64_t>(base_va_b + 2 * sim::isa::kInstrBytes))
+                     << '\n';
+    process_b_source << "HALT\n";
 
-    const CaseAOutcome case_a = RunCaseA(alice_program, alice_base_va);
-    const CaseBOutcome case_b = RunCaseB(alice_program, alice_base_va, bob_program, bob_base_va);
-    const sim::core::ExecResult case_c = RunCaseC(alice_program, alice_base_va, bob_program, bob_base_va);
+    const sim::isa::AsmProgram program_a = sim::isa::AssembleText(process_a_source, base_va_a);
+    const sim::isa::AsmProgram program_b = sim::isa::AssembleText(process_b_source.str(), base_va_b);
 
-    return (case_a.result.trap.reason == sim::core::TrapReason::HALT && case_a.has_gateway_load_ok &&
-            !case_b.register_result.ok && case_b.register_result.error.find("missing_window") != std::string::npos &&
-            case_b.has_missing_window_audit && case_c.trap.reason == sim::core::TrapReason::EWC_ILLEGAL_PC)
+    const CaseOutcome case_a = RunCaseA(program_a, base_va_a);
+    const CaseOutcome case_b = RunCaseB(program_a, base_va_a, program_b, base_va_b);
+
+    return (case_a.result.trap.reason == sim::core::TrapReason::HALT &&
+            case_b.result.trap.reason == sim::core::TrapReason::EWC_ILLEGAL_PC &&
+            case_b.has_expected_ewc_audit)
                ? 0
                : 1;
   } catch (const std::exception& ex) {

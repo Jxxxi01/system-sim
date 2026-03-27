@@ -162,6 +162,15 @@ target_link_libraries(demo_cross_user
     simulator_core
 )
 
+add_executable(demo_malicious_mapping
+  demos/malicious_mapping/demo_malicious_mapping.cpp
+)
+
+target_link_libraries(demo_malicious_mapping
+  PRIVATE
+    simulator_core
+)
+
 add_executable(demo_cross_process
   demos/cross_process/demo_cross_process.cpp
 )

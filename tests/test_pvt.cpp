@@ -96,7 +96,6 @@ SIM_TEST(RegisterPage_CodePage_ValidWindow_Succeeds) {
       hardware.GetPvtTable().RegisterPage(handle, va, sim::security::PvtPageType::CODE);
 
   SIM_EXPECT_TRUE(result.ok);
-  SIM_EXPECT_EQ(result.pa_page_id, va / sim::security::kPageSize);
   const sim::security::PvtEntry* entry = hardware.GetPvtTable().LookupPage(result.pa_page_id);
   SIM_EXPECT_TRUE(entry != nullptr);
   SIM_EXPECT_EQ(entry->owner_user_id, 41u);
@@ -129,7 +128,7 @@ SIM_TEST(RegisterPage_CodePage_NoWindow_Fails) {
       hardware.GetPvtTable().RegisterPage(5, 0x4000, sim::security::PvtPageType::CODE);
 
   SIM_EXPECT_TRUE(!result.ok);
-  SIM_EXPECT_TRUE(hardware.GetPvtTable().LookupPage(0x4000 / sim::security::kPageSize) == nullptr);
+  SIM_EXPECT_TRUE(hardware.GetPvtTable().LookupPage(result.pa_page_id) == nullptr);
   const auto& events = hardware.GetAuditCollector().GetEvents();
   SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
   SIM_EXPECT_EQ(events[0].type, std::string("PVT_MISMATCH"));
@@ -179,7 +178,7 @@ SIM_TEST(RegisterPage_CodePage_OwnerMismatch_Fails) {
       hardware.GetPvtTable().RegisterPage(bob_handle, alice_va, sim::security::PvtPageType::CODE);
 
   SIM_EXPECT_TRUE(!result.ok);
-  SIM_EXPECT_TRUE(hardware.GetPvtTable().LookupPage(alice_va / sim::security::kPageSize) == nullptr);
+  SIM_EXPECT_TRUE(hardware.GetPvtTable().LookupPage(result.pa_page_id) == nullptr);
   const auto& events = hardware.GetAuditCollector().GetEvents();
   SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
   SIM_EXPECT_EQ(events[0].type, std::string("PVT_MISMATCH"));
@@ -200,7 +199,7 @@ SIM_TEST(RegisterPage_PageTypePermissionsMismatch_Fails) {
       hardware.GetPvtTable().RegisterPage(handle, va, sim::security::PvtPageType::CODE);
 
   SIM_EXPECT_TRUE(!result.ok);
-  SIM_EXPECT_TRUE(hardware.GetPvtTable().LookupPage(va / sim::security::kPageSize) == nullptr);
+  SIM_EXPECT_TRUE(hardware.GetPvtTable().LookupPage(result.pa_page_id) == nullptr);
   const auto& events = hardware.GetAuditCollector().GetEvents();
   SIM_EXPECT_EQ(events.size(), static_cast<std::size_t>(1));
   SIM_EXPECT_EQ(events[0].type, std::string("PVT_MISMATCH"));
@@ -236,7 +235,13 @@ SIM_TEST(LoadProcess_WithPages_RegistersPvt) {
       {1, 2, 3, 4}));
 
   SIM_EXPECT_EQ(handle, static_cast<sim::security::ContextHandle>(1));
-  const sim::security::PvtEntry* entry = hardware.GetPvtTable().LookupPage(base_va / sim::security::kPageSize);
+  const sim::kernel::ProcessContext* process = processes.GetProcess(handle);
+  SIM_EXPECT_TRUE(process != nullptr);
+  const std::size_t page_count = process != nullptr ? process->pvt_page_ids.size() : 0;
+  SIM_EXPECT_EQ(page_count, static_cast<std::size_t>(1));
+  const std::uint64_t pa_page_id =
+      (process != nullptr && !process->pvt_page_ids.empty()) ? process->pvt_page_ids[0] : 0;
+  const sim::security::PvtEntry* entry = hardware.GetPvtTable().LookupPage(pa_page_id);
   SIM_EXPECT_TRUE(entry != nullptr);
   SIM_EXPECT_EQ(entry->owner_user_id, 55u);
   SIM_EXPECT_EQ(entry->expected_va, base_va);

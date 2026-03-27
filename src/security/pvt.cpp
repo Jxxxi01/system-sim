@@ -6,9 +6,12 @@
 namespace sim::security {
 namespace {
 
-class IdentityMappedPageAllocator final : public PageAllocator {
+class MonotonicPageAllocator final : public PageAllocator {
  public:
-  std::uint64_t AllocatePageId(std::uint64_t va) const override { return va / kPageSize; }
+  std::uint64_t AllocatePageId(std::uint64_t /*va*/) const override { return next_page_id_++; }
+
+ private:
+  mutable std::uint64_t next_page_id_ = 1;
 };
 
 bool PermissionsMatchPageType(PvtPageType page_type, MemoryPermissions permissions) {
@@ -38,7 +41,7 @@ std::string MakeMismatchDetail(ContextHandle handle, std::uint64_t va, PvtPageTy
 }  // namespace
 
 const PageAllocator& DefaultPageAllocator() {
-  static const IdentityMappedPageAllocator allocator;
+  static const MonotonicPageAllocator allocator;
   return allocator;
 }
 
