@@ -128,7 +128,7 @@ Issue 0-11 已完成全部核心模块开发和 5 类 Demo 场景。
 
 > 基于 Claude + Codex 双重代码审查报告（`docs/review_repo_byclaude.md`, `docs/review_repo_bycodex.md`），针对安全性缺陷、代码质量、demo 覆盖度进行最终一轮迭代。
 
-### Issue 12：Hidden entry / saved_PC
+### Issue 12：Hidden entry / saved_PC ✅
 
 | 项目 | 内容 |
 |------|------|
@@ -138,7 +138,7 @@ Issue 0-11 已完成全部核心模块开发和 5 类 Demo 场景。
 | 预期改动 | 1. `SecurityHardware` per-handle metadata 扩展（新增 `saved_pc` + `user_id` 字段）；2. `Gateway::Load` 初始化 `saved_pc`；`GatewayLoadResult` 中 `base_va` 保留但语义重定义为 code load address（供 PVT 页面注册使用），不再作为 entry point；3. `ExecuteProgram` 移除 `entry_pc` 参数，从 active context 的 `saved_pc` 读取；4. 所有 demo + 测试适配新接口 |
 | 核心验收标准 | 1. 外部调用方不再显式传入 `entry_pc`；2. `ExecuteProgram` 从硬件上下文读 `saved_pc`；3. `GatewayLoadResult` 不暴露专门的 entry 字段（`base_va` 仅为 load address）；4. 增加恶意 OS 测试：证明无法指定任意首次入口（mid-function entry 被拒绝）；5. 全部测试继续通过 |
 
-### Issue 13：Audit 修复 + 代码质量
+### Issue 13：Audit 修复 + 代码质量 ✅
 
 | 项目 | 内容 |
 |------|------|
@@ -147,7 +147,7 @@ Issue 0-11 已完成全部核心模块开发和 5 类 Demo 场景。
 | 预期改动 | 1. 修复 `EWC_ILLEGAL_PC`（executor.cpp）审计中 user_id=0：executor 持有 `SecurityHardware` 引用，可直接查 active handle → user_id；2. 修复 `PVT_MISMATCH`（pvt.cpp）审计中 user_id=0：**需为 `PvtTable` 新增 handle→user_id 解析依赖**（当前 PvtTable 仅持有 `EwcTable&` / `AuditCollector&` / `PageAllocator&`，不具备 user_id 查询能力），建议注入 `std::function<uint32_t(ContextHandle)>` 类型的 resolver，由 SecurityHardware 在构造时提供；3. 合并重复的 `OpToString`（executor.cpp + spe.cpp）为共享 utility；4. 删除 demo_normal.cpp 中的死函数 `ProgramEndVa`；5. 修正 SPE stage 标签（CALL/J/BEQ 的 `"decode"` → `"execute"`）；6. SPE Policy struct 添加 bounds 字段占位 + 注释（设计尚未成熟，不做 demo） |
 | 核心验收标准 | 1. `EWC_ILLEGAL_PC` 与 `PVT_MISMATCH` 审计均能正确反映 handle 归属用户；2. PvtTable 通过显式注入的 resolver 获取 user_id，而非直接依赖 SecurityHardware 整体；3. 无重复 OpToString；4. SPE stage 标签与实际检查阶段一致；5. 全部测试继续通过 |
 
-### Issue 14A：Demo 重命名 + 真正的 same-user cross-process
+### Issue 14A：Demo 重命名 + 真正的 same-user cross-process ✅
 
 | 项目 | 内容 |
 |------|------|
@@ -157,7 +157,7 @@ Issue 0-11 已完成全部核心模块开发和 5 类 Demo 场景。
 | claim 边界 | 本 demo 证明 **same-user 下 EWC per-handle 代码执行窗口隔离**（per-process execution window）。不 claim 完整的 same-user cross-process data isolation（SPE bounds 尚未实现完整 data bounds） |
 | 核心验收标准 | 1. demo_malicious_mapping 保持原有行为和测试绿灯；2. 新 demo_cross_process 明确使用 same-user / different-handle；3. 演示结果为 `EWC_ILLEGAL_PC`，证明 per-process execution window 生效；4. 全部测试继续通过 |
 
-### Issue 14B：Ablation demo（配置 + 攻击准备驱动的安全逐步削弱）
+### Issue 14B：Ablation demo（配置 + 攻击准备驱动的安全逐步削弱） ✅
 
 | 项目 | 内容 |
 |------|------|
@@ -168,7 +168,7 @@ Issue 0-11 已完成全部核心模块开发和 5 类 Demo 场景。
 | 预期产出 | 新增：`demos/ablation/demo_ablation.cpp` + README |
 | 核心验收标准 | 1. 三层攻击结果与预期一致（EWC 拦截 / Decrypt 拦截 / 攻击成功）；2. 不修改 executor 安全语义，仅通过 demo 配置与硬件状态准备实现；3. 输出清晰展示安全层级递减叙事 |
 
-### Issue 15：文档对齐
+### Issue 15：文档对齐 ✅
 
 | 项目 | 内容 |
 |------|------|
@@ -200,11 +200,11 @@ Issue 0 (Scaffold)       [done]
 --- 最终迭代轮 ---
 
 Issue 11 (baseline)
-  -> Issue 12 (Hidden entry / saved_PC)
-    -> Issue 13 (Audit fix + code quality)
-      -> Issue 14A (Demo rename + same-user cross-process)
-        -> Issue 14B (Ablation demo)
-          -> Issue 15 (Document alignment)
+  -> Issue 12 (Hidden entry / saved_PC) [done]
+    -> Issue 13 (Audit fix + code quality) [done]
+      -> Issue 14A (Demo rename + same-user cross-process) [done]
+        -> Issue 14B (Ablation demo) [done]
+          -> Issue 15 (Document alignment) [done]
 ```
 
 核心安全故事最小闭环（Issue 4-6）和完整安全演示闭环（Issue 4-9）均已完成。
@@ -271,7 +271,7 @@ MEE 不单独开 Issue。Issue 4 的伪解密已覆盖 MEE 核心语义（key-ba
 | M3：跨用户安全闭环 | 4 + 5 + 6（A+B） | 上下文切换 + cross_user demo | ✅ |
 | M4：完整安全演示 | 4-9 | PVT + SPE + 5 类 demo 全部可用 | ✅ |
 | M5：打磨 | 10 + 11 | 审计正规化 + SecureIR 生成器 | ✅ |
-| M6：安全性增强 | 12 | Hidden entry / saved_PC，OS 不可篡改入口 | 待开始 |
-| M7：质量修复 | 12 + 13 | 审计 user_id 正确 + 代码重复清理 | 待开始 |
-| M8：完整 Demo 覆盖 | 12-14B | same-user cross-process + ablation demo | 待开始 |
-| M9：文档收尾 | 12-15 | 代码与文档完全对齐 | 待开始 |
+| M6：安全性增强 | 12 | Hidden entry / saved_PC，OS 不可篡改入口 | ✅ |
+| M7：质量修复 | 12 + 13 | 审计 user_id 正确 + 代码重复清理 | ✅ |
+| M8：完整 Demo 覆盖 | 12-14B | same-user cross-process + ablation demo | ✅ |
+| M9：文档收尾 | 12-15 | 代码与文档完全对齐 | ✅ |

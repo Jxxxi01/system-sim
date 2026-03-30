@@ -71,13 +71,13 @@ demo 证明：系统不会只在内部阻断 violation，而是会输出与 cont
 |---|---|---|---|
 | 正常执行 | baseline | — | **[Current]** |
 | 跨用户非法执行 | 跨隔离域访问 / confused deputy | WESEE [S&P'24]; CWE-284 (Improper Access Control) | **[Current]** |
-| 代码页篡改（密文-key 不匹配） | OS 篡改物理页面内容 | WESEE [S&P'24]; CWE-345 (Insufficient Verification of Data Authenticity) | **[Scaffolded]** ¹ |
-| PVT owner/VA inconsistency | OS 构造恶意映射 | CounterSEVeillance [NDSS'25]; CWE-269 (Improper Privilege Management) | **[Scaffolded]** ² |
-| ROP / CFI 违规 | 控制流劫持 | SLAM [S&P'24]; CWE-416 (Use After Free) / CWE-787 (Out-of-bounds Write) | **[Scaffolded]** ³ |
+| 代码页篡改（密文-key 不匹配） | OS 篡改物理页面内容 | WESEE [S&P'24]; CWE-345 (Insufficient Verification of Data Authenticity) | **[Current]** ¹ |
+| PVT owner/VA inconsistency | OS 构造恶意映射 | CounterSEVeillance [NDSS'25]; CWE-269 (Improper Privilege Management) | **[Current]** ² |
+| ROP / CFI 违规 | 控制流劫持 | SLAM [S&P'24]; CWE-416 (Use After Free) / CWE-787 (Out-of-bounds Write) | **[Current]** ³ |
 
-> ¹ 依赖 Issue 4（pseudo decrypt）完成后可演示。
-> ² 依赖 Issue 7（PVT）完成后可演示；且当前 1:1 VA=PA 下无法演示反 alias 检查。
-> ³ 依赖 Issue 8（SPE）完成后可演示；当前 SPE 为 placeholder。
+> ¹ 已由 Issue 4（pseudo decrypt）+ Issue 9（demo_injection）实现；Issue 14B ablation Layer 2 额外演示 key barrier 退化路径。
+> ² 已由 Issue 7（PVT）+ Issue 9（demo_malicious_mapping）实现 owner mismatch 拦截；反 alias 检查在 1:1 VA=PA flat memory 下仍无法演示。
+> ³ 已由 Issue 8（SPE）+ Issue 9（demo_rop）实现 CFI L3 违规拦截。
 
 ---
 
@@ -127,9 +127,9 @@ demo 证明：系统不会只在内部阻断 violation，而是会输出与 cont
 |---|---|---|---|---|---|---|---|
 | 正常执行 | pass | pass | pass | pass | recorded | **HALT** | [Current] |
 | 跨用户非法执行 | **TRAP** | — | — | — | recorded | **EWC_ILLEGAL_PC** | [Current] |
-| 代码页篡改（密文-key 不匹配） | pass | **TRAP** | — | — | recorded | **DECRYPT_DECODE_FAIL** | [Scaffolded] |
-| PVT owner/VA inconsistency | pass | pass | **TRAP** | — | recorded | **PVT_MISMATCH** | [Scaffolded] |
-| ROP / CFI 违规 | pass | pass | pass | **TRAP** | recorded | **SPE_VIOLATION** | [Scaffolded] |
+| 代码页篡改（密文-key 不匹配） | pass | **TRAP** | — | — | recorded | **DECRYPT_DECODE_FAIL** | [Current] |
+| PVT owner/VA inconsistency | pass | pass | **TRAP** | — | recorded | **PVT_MISMATCH** | [Current] |
+| ROP / CFI 违规 | pass | pass | pass | **TRAP** | recorded | **SPE_VIOLATION** | [Current] |
 
 > **当前 prototype 实现映射**：执行授权 = EWC @ Fetch 阶段，代码完整性 = MAC 验证 @ Decrypt 阶段，数据归属 = PVT @ TLB-miss 阶段，行为合规 = SPE @ Decode/Execute 阶段。
 
@@ -140,9 +140,9 @@ demo 证明：系统不会只在内部阻断 violation，而是会输出与 cont
 | 攻击场景 | 完整系统 | 去掉执行授权 | 去掉代码完整性 | 去掉数据归属 | 去掉行为合规 | 去掉审计 | 证据标签 |
 |---|---|---|---|---|---|---|---|
 | 跨用户非法执行 | EWC_ILLEGAL_PC | **undefined** ¹ | 不变 | 不变 | 不变 | 拦截但无记录 | [Current] |
-| 代码页篡改（密文-key 不匹配） | DECRYPT_DECODE_FAIL | DECRYPT_DECODE_FAIL | **静默执行垃圾或崩溃** | 不变 | 不变 | 拦截但无记录 | [Scaffolded] |
-| PVT owner/VA inconsistency | PVT_MISMATCH | 不变 | 不变 | **攻击成功** | 不变 | 拦截但无记录 | [Scaffolded] |
-| ROP / CFI 违规 | SPE_VIOLATION | 不变 | 不变 | 不变 | **攻击成功** | 拦截但无记录 | [Scaffolded] |
+| 代码页篡改（密文-key 不匹配） | DECRYPT_DECODE_FAIL | DECRYPT_DECODE_FAIL | **静默执行垃圾或崩溃** | 不变 | 不变 | 拦截但无记录 | [Current] |
+| PVT owner/VA inconsistency | PVT_MISMATCH | 不变 | 不变 | **攻击成功** | 不变 | 拦截但无记录 | [Current] |
+| ROP / CFI 违规 | SPE_VIOLATION | 不变 | 不变 | 不变 | **攻击成功** | 拦截但无记录 | [Current] |
 
 > ¹ **undefined**：行为取决于非法 PC 地址处存储的值——若恰好是合法 opcode 则静默错误执行（最危险），否则触发 UNKNOWN_OPCODE。这种不确定性正是执行授权检查需要存在的原因。
 
@@ -184,13 +184,13 @@ demo 证明：系统不会只在内部阻断 violation，而是会输出与 cont
 - 审计中必须出现 `CTX_SWITCH` 与 `EWC_ILLEGAL_PC`
 - trace 中必须能看出 trap 发生时的 active handle
 
-### A3. 代码页篡改（密文-key 不匹配） [Scaffolded]
+### A3. 代码页篡改（密文-key 不匹配） [Current]
 OS 替换物理页面内容后，正确 key 解密产出垃圾：
 - 必须触发 `DECRYPT_DECODE_FAIL`
 - 不能静默执行，也不能被误归类为一般非法内存错误
 - 依赖 Issue 4（pseudo decrypt）完成
 
-### A4. PVT owner/VA inconsistency [Scaffolded]
+### A4. PVT owner/VA inconsistency [Current]
 当代码页 owner 或 VA 与 window 语义不一致时：
 - 必须触发 `PVT_MISMATCH`
 - 审计必须保留对应事件
@@ -249,16 +249,16 @@ OS 替换物理页面内容后，正确 key 解密产出垃圾：
 - EWC allow / deny [Current]
 - Fetch-stage mandatory enforcement [Current]
 - context switch changes active windows [Current]
-- correct key / wrong key decryption behavior [Scaffolded]
-- PVT consistency checks [Scaffolded]
+- correct key / wrong key decryption behavior [Current]
+- PVT consistency checks [Current]
 - audit event emission correctness [Current]
 
 ### G2. Narrative demos（最小攻击叙事）
 - normal execution [Current]
 - cross-user illegal execution [Current]
-- 代码页篡改（密文-key 不匹配） [Scaffolded]
-- PVT owner/VA inconsistency [Scaffolded]
-- ROP / CFI violation [Scaffolded]
+- 代码页篡改（密文-key 不匹配） [Current]
+- PVT owner/VA inconsistency [Current]
+- ROP / CFI violation [Current]
 
 ### G3. Future workload shell（后续再扩展）
 未来若引入公开 demo / 测试集，不以"吞吐 benchmark"为首要目标，而以"让 contract 语义进入更真实程序形态"为目标。
