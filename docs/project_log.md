@@ -2726,3 +2726,10 @@ Section 6 Simplification Register：不改。
 #### 已知限制
 
 - Issue 15 由 Claude Code 直接编辑 .md 文件完成，未经 Codex coding session（纯文档任务，无 .cpp/.hpp 变更）
+
+### Push Status
+
+- 分支：`issue-15-doc-alignment`
+- Commit：`94d5a0a`
+- 推送时间：2026-03-30
+- 状态：✅ 已推送至 origin
